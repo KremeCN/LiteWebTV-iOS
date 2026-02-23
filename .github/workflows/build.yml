@@ -42,6 +42,7 @@ jobs:
             -derivedDataPath build-sim
 
       - name: Run in iOS Simulator & Screenshot
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           SIM_APP_PATH=$(find build-sim -name "LiteWebTV.app" -type d | head -1)
           echo "App: $SIM_APP_PATH"
@@ -87,10 +88,16 @@ jobs:
 
       - name: Upload Screenshots
         uses: actions/upload-artifact@v4
-        if: always()
+        if: startsWith(github.ref, 'refs/tags/')
         with:
           name: Simulator-Screenshots
           path: screenshot_*.png
+
+      - name: Package Simulator App (Appetize.io)
+        run: |
+          SIM_APP_PATH=$(find build-sim -name "LiteWebTV.app" -type d | head -1)
+          cd "$(dirname "$SIM_APP_PATH")"
+          tar -czf "$GITHUB_WORKSPACE/LiteWebTV-Simulator.tar.gz" "LiteWebTV.app"
 
       - name: Package IPA (TrollStore)
         run: |
@@ -105,6 +112,12 @@ jobs:
         with:
           name: LiteWebTV-iOS
           path: LiteWebTV.ipa
+
+      - name: Upload Simulator App (for Appetize.io)
+        uses: actions/upload-artifact@v4
+        with:
+          name: LiteWebTV-Simulator
+          path: LiteWebTV-Simulator.tar.gz
 
       - name: Create Release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
