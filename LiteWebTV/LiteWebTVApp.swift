@@ -4,6 +4,15 @@ import SwiftUI
 struct LiteWebTVApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     
+    // 缓存在覆写前的真实本地时区（用于界面的双时区显示换算）
+    static let realLocalTimeZone = TimeZone.current
+    
+    init() {
+        // 强制全应用（含 WKWebView JS 引擎）使用北京时间 (UTC+8)
+        // 解决非东八区用户访问央视网页时，节目单匹配错乱的问题
+        NSTimeZone.default = TimeZone(identifier: "Asia/Shanghai")!
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()

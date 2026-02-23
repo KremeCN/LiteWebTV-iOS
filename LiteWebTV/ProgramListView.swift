@@ -50,7 +50,7 @@ private struct ProgramRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(item.time)
+            Text(item.displayTime)
                 .font(.system(size: 14))
                 .foregroundColor(item.isCurrent ? Color(hex: "00FF00") : Color(hex: "AAAAAA"))
 
