@@ -2,7 +2,7 @@ name: LiteWebTV
 options:
   bundleIdPrefix: com.kremecn
   deploymentTarget:
-    iOS: "16.0"
+    iOS: "15.0"
   xcodeVersion: "15.0"
   generateEmptyDirectories: true
 
