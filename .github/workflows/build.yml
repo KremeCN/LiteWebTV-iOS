@@ -32,8 +32,17 @@ jobs:
             DEVELOPMENT_TEAM="" \
             -allowProvisioningUpdates
 
-      - name: Build (Simulator)
+      - name: List available Xcode versions
+        run: ls -d /Applications/Xcode*.app
+
+      - name: Build (Simulator - using older Xcode for Appetize.io)
         run: |
+          # 选择最旧的 Xcode 以降低 SDK 版本
+          OLDEST_XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | head -1)
+          echo "Using Xcode: $OLDEST_XCODE"
+          sudo xcode-select -s "$OLDEST_XCODE"
+          xcodebuild -version
+
           xcodebuild \
             -project LiteWebTV.xcodeproj \
             -scheme LiteWebTV \
