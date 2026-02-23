@@ -15,7 +15,7 @@ struct ChannelItem: Codable, Identifiable {
 struct ProgramItem: Codable, Identifiable {
     let time: String       // 播出时间
     let title: String      // 节目名称
-    let isCurrent: Bool    // 是否正在播出
+    var isCurrent: Bool    // 是否正在播出
 
     var id: String { "\(time)-\(title)" }
     

@@ -376,15 +376,40 @@ extension WebViewModel: WKScriptMessageHandler {
             case "programList":
                 guard let jsonString = body["data"] as? String,
                       let data = jsonString.data(using: .utf8),
-                      let list = try? JSONDecoder().decode([ProgramItem].self, from: data)
+                      var list = try? JSONDecoder().decode([ProgramItem].self, from: data)
                 else { return }
 
-                self.programs = list
-                if let activeIndex = list.firstIndex(where: { $0.isCurrent }) {
-                    self.currentProgramIndex = activeIndex
-                } else {
-                    self.currentProgramIndex = 0
+                // 废弃原网页不靠谱的 isCurrent (受海外浏览器时区干扰)
+                // 在 Swift 中用绝对的北京时间重新计算当前节目
+                var calendar = Calendar.current
+                calendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+                let now = Date()
+                let currentH = calendar.component(.hour, from: now)
+                let currentM = calendar.component(.minute, from: now)
+                let currentTotalMinutes = currentH * 60 + currentM
+                
+                var activeIndex = -1
+                for i in 0..<list.count {
+                    list[i].isCurrent = false // 强制清空错误的高亮
+                    
+                    let parts = list[i].time.split(separator: ":")
+                    if parts.count == 2, let h = Int(parts[0]), let m = Int(parts[1]) {
+                        let progTotalMinutes = h * 60 + m
+                        if progTotalMinutes <= currentTotalMinutes {
+                            activeIndex = i
+                        }
+                    }
                 }
+                
+                if activeIndex >= 0 && activeIndex < list.count {
+                    list[activeIndex].isCurrent = true
+                } else if !list.isEmpty {
+                    list[list.count - 1].isCurrent = true // 跨午夜前的后备安全措施
+                    activeIndex = list.count - 1
+                }
+
+                self.programs = list
+                self.currentProgramIndex = max(0, activeIndex)
 
             case "title":
                 if let title = body["data"] as? String, !title.isEmpty {
