@@ -53,11 +53,11 @@ jobs:
           zip -r LiteWebTV.ipa Payload/
           rm -rf Payload/
 
-      - name: Package Simulator App (Appetize.io)
+      - name: Locate Simulator App
+        id: sim-app
         run: |
           SIM_APP_PATH=$(find build-sim -name "LiteWebTV.app" -type d | head -1)
-          cd "$(dirname "$SIM_APP_PATH")"
-          zip -r "$GITHUB_WORKSPACE/LiteWebTV-Simulator.zip" "LiteWebTV.app"
+          echo "path=$SIM_APP_PATH" >> "$GITHUB_OUTPUT"
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
@@ -69,7 +69,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: LiteWebTV-Simulator
-          path: LiteWebTV-Simulator.zip
+          path: ${{ steps.sim-app.outputs.path }}
 
       - name: Create Release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
