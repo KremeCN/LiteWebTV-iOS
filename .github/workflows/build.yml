@@ -37,10 +37,9 @@ jobs:
           xcodebuild \
             -project LiteWebTV.xcodeproj \
             -scheme LiteWebTV \
-            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
             -configuration Release \
             -derivedDataPath build-sim \
-            -arch x86_64 -arch arm64 \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO
@@ -53,11 +52,11 @@ jobs:
           zip -r LiteWebTV.ipa Payload/
           rm -rf Payload/
 
-      - name: Prepare Simulator App (Appetize.io)
+      - name: Package Simulator App (Appetize.io)
         run: |
           SIM_APP_PATH=$(find build-sim -name "LiteWebTV.app" -type d | head -1)
-          mkdir -p appetize-upload
-          cp -r "$SIM_APP_PATH" appetize-upload/
+          cd "$(dirname "$SIM_APP_PATH")"
+          tar -czf "$GITHUB_WORKSPACE/LiteWebTV-Simulator.tar.gz" "LiteWebTV.app"
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
@@ -69,7 +68,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: LiteWebTV-Simulator
-          path: appetize-upload
+          path: LiteWebTV-Simulator.tar.gz
 
       - name: Create Release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
