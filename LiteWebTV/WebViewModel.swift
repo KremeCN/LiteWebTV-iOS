@@ -101,8 +101,12 @@ final class WebViewModel: NSObject, ObservableObject {
     private func installContentRules() {
         // WKContentRuleList 使用 Safari Content Blocker 的 JSON 格式
         let rules: [[String: Any]] = [
-            // 1. 字体文件拦截
-            ["trigger": ["url-filter": ".*\\.(woff2?|ttf|otf|eot)$"],
+            // 1. 字体文件拦截（注意：WebKit Content Blocker 不支持 `?` 量词）
+            ["trigger": ["url-filter": ".*\\.woff2"],
+             "action": ["type": "block"]],
+            ["trigger": ["url-filter": ".*\\.woff"],
+             "action": ["type": "block"]],
+            ["trigger": ["url-filter": ".*\\.(ttf|otf|eot)$"],
              "action": ["type": "block"]],
             ["trigger": ["url-filter": ".*/fonts/"],
              "action": ["type": "block"]],

@@ -18,6 +18,8 @@ targets:
     platform: iOS
     info:
       path: LiteWebTV/Info.plist
+      properties:
+        UILaunchScreen: {}
     sources:
       - path: LiteWebTV
     settings:
