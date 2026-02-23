@@ -412,8 +412,12 @@ extension WebViewModel: WKScriptMessageHandler {
                 self.currentProgramIndex = max(0, activeIndex)
 
             case "title":
-                if let title = body["data"] as? String, !title.isEmpty {
-                    self.currentTitle = title
+                // 废弃原网页不靠谱的 title（受海外浏览器时区干扰）
+                // 既然我们在 programList 阶段已经用北京时间绝对算出了正确的当前节目，直接用我们的！
+                if !self.programs.isEmpty && self.currentProgramIndex < self.programs.count {
+                    self.currentTitle = self.programs[self.currentProgramIndex].title
+                } else if let title = body["data"] as? String, !title.isEmpty {
+                    self.currentTitle = title // 刚开屏或无节目的兜底
                 }
 
             case "dismissSplash":
