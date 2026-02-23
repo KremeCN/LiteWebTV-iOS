@@ -114,13 +114,9 @@ jobs:
           
           APP_PATH=$(find build -name "LiteWebTV.app" -type d | head -1)
           
-          # Extract current entitlements if any, and forcibly disable get-task-allow
-          # This is the critical fix for the iOS 16 "Developer Mode Required" prompt
-          ldid -e "$APP_PATH/LiteWebTV" > ents.plist
-          
-          # if empty, create a minimal valid plist
-          if [ ! -s ents.plist ]; then
-            cat <<EOF > ents.plist
+          # Since the binary was built completely unsigned, it has no existing signature for ldid -e to extract.
+          # We instead directly generate our own clean pseudo-signature entitlements to inject.
+          cat <<EOF > ents.plist
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -132,11 +128,7 @@ jobs:
           </dict>
           </plist>
           EOF
-          else
-            # If it already exists, replace or insert get-task-allow as NO using Apple's plutil
-            plutil -replace get-task-allow -bool NO ents.plist || plutil -insert get-task-allow -bool NO ents.plist
-          fi
-          
+
           # Re-sign the executable with the clean entitlements
           ldid -Sents.plist "$APP_PATH/LiteWebTV"
           
