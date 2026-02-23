@@ -325,8 +325,10 @@ struct ContentView: View {
             let dy = value.translation.height
             let absDx = abs(dx)
             let absDy = abs(dy)
-            let swipeThreshold: CGFloat = 100
-            let velocityThreshold: CGFloat = 200
+            
+            // 降低阈值，使划动更灵敏
+            let swipeThreshold: CGFloat = 50
+            let velocityThreshold: CGFloat = 100
             let velocity = value.predictedEndTranslation
 
             // 水平滑动优先
@@ -526,83 +528,86 @@ struct SplashView: View {
     @State private var dotAlphas: [Double] = [0.3, 0.3, 0.3]
 
     var body: some View {
-        ZStack {
-            // 黑色底
-            Color.black
+        GeometryReader { geo in
+            ZStack {
+                // 黑色底
+                Color.black
 
-            // 魅影紫呼吸灯
-            // Maps from: bg_breathing_light.xml — radial gradient #FF0055 → #4A148C → #000000
-            RadialGradient(
-                gradient: Gradient(colors: [
-                    Color(hex: "FF0055"),
-                    Color(hex: "4A148C"),
-                    Color.black
-                ]),
-                center: .center,
-                startRadius: 0,
-                endRadius: 500
-            )
-            .opacity(breathingAlpha)
+                // 魅影紫呼吸灯
+                // Maps from: bg_breathing_light.xml — radial gradient #FF0055 → #4A148C → #000000
+                RadialGradient(
+                    gradient: Gradient(colors: [
+                        Color(hex: "FF0055"),
+                        Color(hex: "4A148C"),
+                        Color.black
+                    ]),
+                    center: .center,
+                    startRadius: 0,
+                    endRadius: 500
+                )
+                .opacity(breathingAlpha)
 
-            // 磨砂覆盖层
-            // Maps from: bg_frosted_overlay.xml — #B3000000
-            Color.black.opacity(0.7)
+                // 磨砂覆盖层
+                // Maps from: bg_frosted_overlay.xml — #B3000000
+                Color.black.opacity(0.7)
 
-            // 中央内容
-            VStack(spacing: 0) {
-                Spacer()
+                // 中央内容
+                VStack(spacing: 0) {
+                    Spacer()
 
-                // 标题
-                Text("LiteWebTV")
-                    .font(.system(size: 48, weight: .bold))
-                    .foregroundColor(.white)
-                    .tracking(4)
-                    .shadow(color: .black.opacity(0.5), radius: 10, x: 2, y: 2)
+                    // 标题
+                    Text("LiteWebTV")
+                        .font(.system(size: 48, weight: .bold))
+                        .foregroundColor(.white)
+                        .tracking(4)
+                        .shadow(color: .black.opacity(0.5), radius: 10, x: 2, y: 2)
 
-                // 分隔线
-                Rectangle()
-                    .fill(Color(hex: "00A1D6"))
-                    .frame(width: 60, height: 2)
-                    .padding(.vertical, 20)
+                    // 分隔线
+                    Rectangle()
+                        .fill(Color(hex: "00A1D6"))
+                        .frame(width: 60, height: 2)
+                        .padding(.vertical, 20)
 
-                // 状态文字
-                Text(statusText)
-                    .font(.system(size: 18))
-                    .foregroundColor(Color(hex: "DDDDDD"))
-                    .shadow(color: .black.opacity(0.5), radius: 5, x: 1, y: 1)
+                    // 状态文字
+                    Text(statusText)
+                        .font(.system(size: 18))
+                        .foregroundColor(Color(hex: "DDDDDD"))
+                        .shadow(color: .black.opacity(0.5), radius: 5, x: 1, y: 1)
 
-                // 三点加载动画
-                HStack(spacing: 16) {
-                    ForEach(0..<3, id: \.self) { index in
-                        Circle()
-                            .fill(Color(hex: "00A1D6"))
-                            .frame(width: 10, height: 10)
-                            .opacity(dotAlphas[index])
+                    // 三点加载动画
+                    HStack(spacing: 16) {
+                        ForEach(0..<3, id: \.self) { index in
+                            Circle()
+                                .fill(Color(hex: "00A1D6"))
+                                .frame(width: 10, height: 10)
+                                .opacity(dotAlphas[index])
+                        }
                     }
+                    .padding(.top, 24)
+
+                    Spacer()
+
+                    // 底部声明
+                    VStack(spacing: 8) {
+                        Text("！开源共享，禁止买卖！")
+                            .font(.system(size: 20, weight: .bold))
+                            .foregroundColor(Color(hex: "FF5252"))
+                            .shadow(color: .black.opacity(0.5), radius: 3, x: 1, y: 1)
+
+                        Text("https://github.com/YukonKong/LiteWebTV")
+                            .font(.system(size: 14))
+                            .foregroundColor(Color(hex: "BBBBBB"))
+
+                        Text("https://gitee.com/YukonKong/LiteWebTV")
+                            .font(.system(size: 14))
+                            .foregroundColor(Color(hex: "BBBBBB"))
+                    }
+                    .padding(.bottom, 40)
                 }
-                .padding(.top, 24)
-
-                Spacer()
-
-                // 底部声明
-                VStack(spacing: 8) {
-                    Text("！开源共享，禁止买卖！")
-                        .font(.system(size: 20, weight: .bold))
-                        .foregroundColor(Color(hex: "FF5252"))
-                        .shadow(color: .black.opacity(0.5), radius: 3, x: 1, y: 1)
-
-                    Text("https://github.com/YukonKong/LiteWebTV")
-                        .font(.system(size: 14))
-                        .foregroundColor(Color(hex: "BBBBBB"))
-
-                    Text("https://gitee.com/YukonKong/LiteWebTV")
-                        .font(.system(size: 14))
-                        .foregroundColor(Color(hex: "BBBBBB"))
-                }
-                .padding(.bottom, 40)
             }
+            .frame(width: geo.size.width, height: geo.size.height)
+            .edgesIgnoringSafeArea(.all)
         }
-        .ignoresSafeArea()
         .onAppear {
             startBreathingAnimation()
             startDotAnimation()

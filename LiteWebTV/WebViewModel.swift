@@ -82,10 +82,7 @@ final class WebViewModel: NSObject, ObservableObject {
         config.allowsInlineMediaPlayback = true
 
         webView = WKWebView(frame: .zero, configuration: config)
-        // iOS 的 WKWebView 使用桌面端 UA 可能会导致央视页面下发不支持的播放器或卡加载。
-        // 改用 iPad 的 UA，既能获得完整网页版排版，又能确保下发 iOS 兼容的 H5 播放器。
-        let ipadUserAgent = "Mozilla/5.0 (iPad; CPU OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
-        webView.customUserAgent = ipadUserAgent
+        webView.customUserAgent = pcUserAgent
         
         webView.navigationDelegate = self
         webView.allowsBackForwardNavigationGestures = false
@@ -94,15 +91,14 @@ final class WebViewModel: NSObject, ObservableObject {
         webView.backgroundColor = .black
         webView.scrollView.backgroundColor = .black
 
-        // 暂时禁用广拦截，排查是否是它拦截了视频信令（如 beacon, trace 等）
-        // installContentRules()
+        // 设置内容拦截规则（广告/追踪/字体/图片）
+        installContentRules()
     }
 
     // MARK: - Content Rules (Ad-blocking)
     // Maps from Android: shouldInterceptRequest in MainActivity.kt:707-754
 
     private func installContentRules() {
-        // [禁用状态，供后续调试开启]
         // WKContentRuleList 使用 Safari Content Blocker 的 JSON 格式
         let rules: [[String: Any]] = [
             // 1. 字体文件拦截
