@@ -18,7 +18,7 @@ jobs:
       - name: Generate Xcode Project
         run: xcodegen generate
 
-      - name: Build
+      - name: Build (Device)
         run: |
           xcodebuild \
             -project LiteWebTV.xcodeproj \
@@ -32,7 +32,20 @@ jobs:
             DEVELOPMENT_TEAM="" \
             -allowProvisioningUpdates
 
-      - name: Package IPA
+      - name: Build (Simulator - for Appetize.io)
+        run: |
+          xcodebuild \
+            -project LiteWebTV.xcodeproj \
+            -scheme LiteWebTV \
+            -sdk iphonesimulator \
+            -configuration Release \
+            -derivedDataPath build-sim \
+            -arch x86_64 -arch arm64 \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Package IPA (TrollStore)
         run: |
           APP_PATH=$(find build -name "LiteWebTV.app" -type d | head -1)
           mkdir -p Payload
@@ -40,14 +53,27 @@ jobs:
           zip -r LiteWebTV.ipa Payload/
           rm -rf Payload/
 
+      - name: Package Simulator App (Appetize.io)
+        run: |
+          SIM_APP_PATH=$(find build-sim -name "LiteWebTV.app" -type d | head -1)
+          cd "$(dirname "$SIM_APP_PATH")"
+          zip -r "$GITHUB_WORKSPACE/LiteWebTV-Simulator.zip" "LiteWebTV.app"
+
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
           name: LiteWebTV-iOS
           path: LiteWebTV.ipa
 
+      - name: Upload Simulator App (for Appetize.io)
+        uses: actions/upload-artifact@v4
+        with:
+          name: LiteWebTV-Simulator
+          path: LiteWebTV-Simulator.zip
+
       - name: Create Release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: LiteWebTV.ipa
+
