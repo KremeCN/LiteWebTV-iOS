@@ -8,6 +8,11 @@ struct WebViewContainer: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
         webView.backgroundColor = .black
+        // 关键：禁止 WKWebView 自动调整内容边距以适应安全区域
+        // 这是视频偏移到右侧的根本原因
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        webView.insetsLayoutMarginsFromSafeArea = false
+        webView.scrollView.insetsLayoutMarginsFromSafeArea = false
         return webView
     }
 

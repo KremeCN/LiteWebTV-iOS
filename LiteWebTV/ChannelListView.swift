@@ -8,45 +8,42 @@ struct ChannelListView: View {
     let onSelect: (ChannelItem) -> Void
 
     var body: some View {
-        GeometryReader { geo in
-            VStack(alignment: .leading, spacing: 0) {
-                // 标题
-                Text("频道列表")
-                    .font(.system(size: 24, weight: .bold))
-                    .foregroundColor(.white)
-                    .padding(.bottom, 16)
+        VStack(alignment: .leading, spacing: 0) {
+            // 标题
+            Text("频道列表")
+                .font(.system(size: 24, weight: .bold))
+                .foregroundColor(.white)
+                .padding(.bottom, 16)
 
-                // 频道列表
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(spacing: 0) {
-                            ForEach(Array(channels.enumerated()), id: \.element.id) { offset, item in
-                                ChannelRow(item: item)
-                                    .id(offset)
-                                    .contentShape(Rectangle())
-                                    .onTapGesture {
-                                        onSelect(item)
-                                    }
-                            }
+            // 频道列表
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(channels.enumerated()), id: \.element.id) { offset, item in
+                            ChannelRow(item: item)
+                                .id(offset)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    onSelect(item)
+                                }
                         }
                     }
-                    .onAppear {
-                        // 自动滚动到当前频道
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                            withAnimation {
-                                proxy.scrollTo(currentIndex, anchor: .center)
-                            }
+                }
+                .onAppear {
+                    // 自动滚动到当前频道
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        withAnimation {
+                            proxy.scrollTo(currentIndex, anchor: .center)
                         }
                     }
                 }
             }
-            .padding(16)
-            .padding(.leading, geo.safeAreaInsets.leading) // 避让刘海/灵动岛
-            .frame(width: 300 + geo.safeAreaInsets.leading)
-            .frame(maxHeight: .infinity)
-            .background(Color.black.opacity(0.9)) // #E6000000
         }
-        .frame(width: 300 + (UIApplication.shared.windows.first?.safeAreaInsets.left ?? 0))
+        .padding(16)
+        .padding(.leading, 44) // 避让刘海（所有带刘海的 iPhone 横屏时约 44-47pt）
+        .frame(width: 344) // 300 + 44
+        .frame(maxHeight: .infinity)
+        .background(Color.black.opacity(0.9))
     }
 }
 
