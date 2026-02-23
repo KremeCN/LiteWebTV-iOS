@@ -9,6 +9,9 @@ on:
 jobs:
   build:
     runs-on: macos-15
+    permissions:
+      contents: write
+      
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -71,8 +74,7 @@ jobs:
           xcrun simctl install "$DEVICE_ID" "$SIM_APP_PATH"
 
           # 启动 app 并捕获它的控制台输出
-          # 使用 --console-pty 将输出实时打到 stdout
-          xcrun simctl launch --console-pty "$DEVICE_ID" com.kremecn.litewebtv &
+          xcrun simctl launch --console "$DEVICE_ID" com.kremecn.litewebtv > app_console.log 2>&1 &
           
           echo "App launched, waiting 15 seconds for splash screen + page load..."
           sleep 15
@@ -85,6 +87,10 @@ jobs:
           sleep 15
           xcrun simctl io "$DEVICE_ID" screenshot screenshot_30s.png
           echo "Screenshot 2 captured at 30s"
+
+          echo "=== APP CONSOLE OUTPUT ==="
+          cat app_console.log || true
+          echo "=========================="
 
           # 关闭模拟器
           xcrun simctl shutdown "$DEVICE_ID" || true
