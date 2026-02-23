@@ -40,10 +40,12 @@ struct ChannelListView: View {
             }
         }
         .padding(16)
-        .padding(.leading, 44) // 避让刘海（所有带刘海的 iPhone 横屏时约 44-47pt）
-        .frame(width: 344) // 300 + 44
+        .frame(width: 300)
         .frame(maxHeight: .infinity)
-        .background(Color.black.opacity(0.9))
+        .background(
+            Color.black.opacity(0.9)
+                .ignoresSafeArea() // 背景无视安全区，充满屏幕边缘
+        )
     }
 }
 

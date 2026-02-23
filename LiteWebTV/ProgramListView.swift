@@ -36,7 +36,10 @@ struct ProgramListView: View {
         .padding(16)
         .frame(width: 300)
         .frame(maxHeight: .infinity)
-        .background(Color.black.opacity(0.9)) // #E6000000
+        .background(
+            Color.black.opacity(0.9)
+                .ignoresSafeArea() // 背景无视安全区，充满屏幕边缘
+        )
     }
 }
 
