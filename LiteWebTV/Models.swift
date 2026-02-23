@@ -31,25 +31,26 @@ struct ProgramItem: Codable, Identifiable {
         // 提取时分并根据时差换算
         let parts = time.split(separator: ":")
         if parts.count == 2, let h = Int(parts[0]), let m = Int(parts[1]) {
-            // 使用当前日期构建一个完整的北京时间 Date
-            var calendar = Calendar.current
-            calendar.timeZone = beijingTZ
-            
+            // 获取当前时间戳在两个时区下分别的 UTC 偏移量（按秒计）
+            // 我们不能用 Date() 和 Calendar.current 进行格式化换算，因为整个 App 的时区已经被我们全局污染为东八区了
             let now = Date()
-            var components = calendar.dateComponents([.year, .month, .day], from: now)
-            components.hour = h
-            components.minute = m
-            components.second = 0
+            let beijingOffset = beijingTZ.secondsFromGMT(for: now)
+            let localOffset = localTZ.secondsFromGMT(for: now)
             
-            if let beijingDate = calendar.date(from: components) {
-                // 将这个具体的 Date 转换回设备的本地时区进行格式化
-                let formatter = DateFormatter()
-                formatter.timeZone = localTZ
-                formatter.dateFormat = "HH:mm"
-                let localTimeStr = formatter.string(from: beijingDate)
-                
-                return "\(time) (\(localTimeStr))"
-            }
+            // 计算东八区和当前物理真实时区的【分钟差】
+            let diffMinutes = (localOffset - beijingOffset) / 60
+            
+            // 严谨计算目标时间，处理跨天、负数绕回
+            // 比如 22:00 减去 6小时（UTC+2） = 16:00
+            // 比如 02:00 减去 6小时 = -04:00 + 24小时 = 20:00 (前一天)
+            var targetTotalMinutes = (h * 60 + m) + diffMinutes
+            targetTotalMinutes = (targetTotalMinutes % 1440 + 1440) % 1440
+            
+            let localH = targetTotalMinutes / 60
+            let localM = targetTotalMinutes % 60
+            let localTimeStr = String(format: "%02d:%02d", localH, localM)
+            
+            return "\(time) (\(localTimeStr))"
         }
         return time
     }
