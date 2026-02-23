@@ -39,25 +39,12 @@ jobs:
             -scheme LiteWebTV \
             -sdk iphonesimulator \
             -configuration Release \
-            -derivedDataPath build-sim \
-            CODE_SIGN_IDENTITY="-"
+            -derivedDataPath build-sim
 
-      - name: Verify Simulator App Bundle
+      - name: Run in iOS Simulator & Screenshot
         run: |
           SIM_APP_PATH=$(find build-sim -name "LiteWebTV.app" -type d | head -1)
           echo "App: $SIM_APP_PATH"
-          echo "=== Info.plist ==="
-          plutil -p "$SIM_APP_PATH/Info.plist"
-          echo "=== Bundle ID ==="
-          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$SIM_APP_PATH/Info.plist"
-
-      - name: Re-sign & Install in Simulator
-        run: |
-          SIM_APP_PATH=$(find build-sim -name "LiteWebTV.app" -type d | head -1)
-          echo "App: $SIM_APP_PATH"
-
-          # 强制 ad-hoc 重新签名（覆盖项目级 CODE_SIGNING_ALLOWED=NO）
-          codesign --force --deep --sign - "$SIM_APP_PATH"
           echo "=== Code signature ==="
           codesign -dvv "$SIM_APP_PATH" 2>&1 || true
           # 找一个可用的 iPhone 模拟器
