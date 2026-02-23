@@ -602,7 +602,7 @@ struct SplashView: View {
 
                     // 底部声明
                     VStack(spacing: 8) {
-                        Text("基于 YukonKong/LiteWebTV 项目移植")
+                        Text("基于 YukonKong/LiteWebTV 重新实现的 iOS 版本")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundColor(Color.white.opacity(0.8))
                         
