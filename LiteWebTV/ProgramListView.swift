@@ -5,6 +5,7 @@ import SwiftUI
 struct ProgramListView: View {
     let programs: [ProgramItem]
     let currentIndex: Int
+    let safeAreaInsets: EdgeInsets
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -34,12 +35,11 @@ struct ProgramListView: View {
             }
         }
         .padding(16)
-        .frame(width: 300)
+        .padding(.trailing, safeAreaInsets.trailing) // 显式注入右侧安全区避让
+        .padding(.bottom, safeAreaInsets.bottom)     // 显式注入底部安全区避让
+        .frame(width: 300 + safeAreaInsets.trailing)
         .frame(maxHeight: .infinity)
-        .background(
-            Color.black.opacity(0.9)
-                .ignoresSafeArea() // 背景无视安全区，充满屏幕边缘
-        )
+        .background(Color.black.opacity(0.9))
     }
 }
 

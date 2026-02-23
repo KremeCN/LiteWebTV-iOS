@@ -89,6 +89,7 @@ struct ContentView: View {
                         ChannelListView(
                             channels: viewModel.channels,
                             currentIndex: viewModel.currentChannelIndex,
+                            safeAreaInsets: geo.safeAreaInsets,
                             onSelect: { item in
                                 let name = viewModel.switchChannel(item)
                                 closeSidebars()
@@ -107,7 +108,8 @@ struct ContentView: View {
                         Spacer()
                         ProgramListView(
                             programs: viewModel.programs,
-                            currentIndex: viewModel.currentProgramIndex
+                            currentIndex: viewModel.currentProgramIndex,
+                            safeAreaInsets: geo.safeAreaInsets
                         )
                         .transition(.move(edge: .trailing))
                     }
