@@ -602,18 +602,24 @@ struct SplashView: View {
 
                     // 底部声明
                     VStack(spacing: 8) {
-                        Text("！开源共享，禁止买卖！")
-                            .font(.system(size: 20, weight: .bold))
-                            .foregroundColor(Color(hex: "FF5252"))
-                            .shadow(color: .black.opacity(0.5), radius: 3, x: 1, y: 1)
+                        Text("基于 YukonKong/LiteWebTV 项目移植")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(Color.white.opacity(0.8))
+                        
+                        Text("本项目为免费的开源软件，遵循 CC BY-SA 4.0 协议")
+                            .font(.system(size: 11))
+                            .foregroundColor(Color.white.opacity(0.5))
+                            .padding(.bottom, 4)
 
-                        Text("https://github.com/YukonKong/LiteWebTV")
-                            .font(.system(size: 14))
-                            .foregroundColor(Color(hex: "BBBBBB"))
-
-                        Text("https://gitee.com/YukonKong/LiteWebTV")
-                            .font(.system(size: 14))
-                            .foregroundColor(Color(hex: "BBBBBB"))
+                        // iOS 仓库链接
+                        HStack(spacing: 4) {
+                            Image(systemName: "swift")
+                                .font(.system(size: 10))
+                                .foregroundColor(Color(hex: "00A1D6"))
+                            Text("GitHub: KremeCN/LiteWebTV-iOS")
+                                .font(.system(size: 12))
+                                .foregroundColor(Color(hex: "BBBBBB"))
+                        }
                     }
                     .padding(.bottom, 40)
                 }
