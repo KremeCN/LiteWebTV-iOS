@@ -106,14 +106,25 @@ final class WebViewModel: NSObject, ObservableObject {
              "action": ["type": "block"]],
             ["trigger": ["url-filter": ".*\\.woff"],
              "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*\\.(ttf|otf|eot)$"],
+            ["trigger": ["url-filter": ".*\\.ttf"],
+             "action": ["type": "block"]],
+            ["trigger": ["url-filter": ".*\\.otf"],
+             "action": ["type": "block"]],
+            ["trigger": ["url-filter": ".*\\.eot"],
              "action": ["type": "block"]],
             ["trigger": ["url-filter": ".*/fonts/"],
              "action": ["type": "block"]],
 
-            // 2. 图片资源拦截
-            ["trigger": ["url-filter": ".*\\.(jpg|jpeg|png|gif|webp|svg|ico|bmp|avif)$"],
-             "action": ["type": "block"]],
+            // 2. 图片资源拦截（每个扩展名单独一条规则）
+            ["trigger": ["url-filter": ".*\\.jpg"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": ".*\\.jpeg"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": ".*\\.png"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": ".*\\.gif"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": ".*\\.webp"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": ".*\\.svg"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": ".*\\.ico"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": ".*\\.bmp"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": ".*\\.avif"], "action": ["type": "block"]],
 
             // 3. 统计追踪 & 广告 & 埋点
             ["trigger": ["url-filter": "hm\\.baidu\\.com"],

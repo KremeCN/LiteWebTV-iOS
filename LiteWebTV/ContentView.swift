@@ -90,9 +90,11 @@ struct ContentView: View {
                                 showSplashScreen(statusText: "即将进入：\(name)")
                             }
                         )
+                        .padding(.leading, geo.safeAreaInsets.leading) // 避让刘海
                         .transition(.move(edge: .leading))
                         Spacer()
                     }
+                    .edgesIgnoringSafeArea(.all)
                     .zIndex(20)
                 }
 
@@ -104,8 +106,10 @@ struct ContentView: View {
                             programs: viewModel.programs,
                             currentIndex: viewModel.currentProgramIndex
                         )
+                        .padding(.trailing, geo.safeAreaInsets.trailing) // 避让底部小白条区域
                         .transition(.move(edge: .trailing))
                     }
+                    .edgesIgnoringSafeArea(.all)
                     .zIndex(20)
                 }
 
