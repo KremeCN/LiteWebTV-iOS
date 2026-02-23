@@ -191,8 +191,35 @@ final class WebViewModel: NSObject, ObservableObject {
     // MARK: - Script Injection
 
     private func injectScripts() {
-        // 先注入 shim，再注入自动化脚本
-        let combinedScript = bridgeShimScript + "\n" + automationScript
+        // 给 WKWebView 添加 console.log 抓取，用于调试卡加载原因
+        let consoleBridge = """
+        (function() {
+            var oldLog = console.log;
+            var oldWarn = console.warn;
+            var oldError = console.error;
+            console.log = function() {
+                oldLog.apply(console, arguments);
+                var msg = Array.from(arguments).map(String).join(' ');
+                window.webkit.messageHandlers.bridge.postMessage({type: 'console', level: 'log', data: msg});
+            };
+            console.warn = function() {
+                oldWarn.apply(console, arguments);
+                var msg = Array.from(arguments).map(String).join(' ');
+                window.webkit.messageHandlers.bridge.postMessage({type: 'console', level: 'warn', data: msg});
+            };
+            console.error = function() {
+                oldError.apply(console, arguments);
+                var msg = Array.from(arguments).map(String).join(' ');
+                window.webkit.messageHandlers.bridge.postMessage({type: 'console', level: 'error', data: msg});
+            };
+            
+            // 顺便覆盖 navigator.platform，伪装得更像 PC
+            Object.defineProperty(navigator, 'platform', { get: function() { return 'Win32'; } });
+        })();
+        """
+        
+        // 先注入 consoleBridge，再注入 shim，再注入自动化脚本
+        let combinedScript = consoleBridge + "\n" + bridgeShimScript + "\n" + automationScript
         webView.evaluateJavaScript(combinedScript) { _, error in
             if let error = error {
                 print("[LiteWebTV] Script injection error: \(error.localizedDescription)")
@@ -361,6 +388,11 @@ extension WebViewModel: WKScriptMessageHandler {
 
             case "dismissSplash":
                 self.onDismissSplash()
+
+            case "console":
+                if let level = body["level"] as? String, let msg = body["data"] as? String {
+                    print("[JS Console] [\(level.uppercased())] \(msg)")
+                }
 
             default:
                 break

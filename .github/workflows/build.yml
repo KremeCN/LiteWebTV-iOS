@@ -69,8 +69,10 @@ jobs:
           # 安装 app
           xcrun simctl install "$DEVICE_ID" "$SIM_APP_PATH"
 
-          # 启动 app
-          xcrun simctl launch "$DEVICE_ID" com.kremecn.litewebtv
+          # 启动 app 并捕获它的控制台输出
+          # 使用 --console-pty 将输出实时打到 stdout
+          xcrun simctl launch --console-pty "$DEVICE_ID" com.kremecn.litewebtv &
+          
           echo "App launched, waiting 15 seconds for splash screen + page load..."
           sleep 15
 
