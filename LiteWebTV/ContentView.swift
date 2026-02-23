@@ -72,6 +72,11 @@ struct ContentView: View {
     // 退出确认
     @State private var lastBackTime: Date = .distantPast
 
+    // MARK: - Safe Area Helper
+    private var realSafeArea: UIEdgeInsets {
+        UIApplication.shared.windows.first?.safeAreaInsets ?? .zero
+    }
+
     // MARK: - Body
 
     var body: some View {
@@ -89,7 +94,7 @@ struct ContentView: View {
                         ChannelListView(
                             channels: viewModel.channels,
                             currentIndex: viewModel.currentChannelIndex,
-                            safeAreaInsets: geo.safeAreaInsets,
+                            realSafeAreaLeft: realSafeArea.left,
                             onSelect: { item in
                                 let name = viewModel.switchChannel(item)
                                 closeSidebars()
@@ -109,7 +114,8 @@ struct ContentView: View {
                         ProgramListView(
                             programs: viewModel.programs,
                             currentIndex: viewModel.currentProgramIndex,
-                            safeAreaInsets: geo.safeAreaInsets
+                            realSafeAreaRight: realSafeArea.right,
+                            realSafeAreaBottom: realSafeArea.bottom
                         )
                         .transition(.move(edge: .trailing))
                     }

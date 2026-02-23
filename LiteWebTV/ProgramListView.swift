@@ -5,7 +5,8 @@ import SwiftUI
 struct ProgramListView: View {
     let programs: [ProgramItem]
     let currentIndex: Int
-    let safeAreaInsets: EdgeInsets
+    let realSafeAreaRight: CGFloat
+    let realSafeAreaBottom: CGFloat
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -35,9 +36,9 @@ struct ProgramListView: View {
             }
         }
         .padding(16)
-        .padding(.trailing, safeAreaInsets.trailing) // 显式注入右侧安全区避让
-        .padding(.bottom, safeAreaInsets.bottom)     // 显式注入底部安全区避让
-        .frame(width: 300 + safeAreaInsets.trailing)
+        .padding(.trailing, realSafeAreaRight) // 显式注入右侧物理安全区避让
+        .padding(.bottom, realSafeAreaBottom)  // 显式注入底部物理安全区避让
+        .frame(width: 300 + realSafeAreaRight)
         .frame(maxHeight: .infinity)
         .background(Color.black.opacity(0.9))
     }

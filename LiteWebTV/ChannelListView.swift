@@ -5,7 +5,7 @@ import SwiftUI
 struct ChannelListView: View {
     let channels: [ChannelItem]
     let currentIndex: Int
-    let safeAreaInsets: EdgeInsets
+    let realSafeAreaLeft: CGFloat
     let onSelect: (ChannelItem) -> Void
 
     var body: some View {
@@ -41,8 +41,8 @@ struct ChannelListView: View {
             }
         }
         .padding(16)
-        .padding(.leading, safeAreaInsets.leading) // 显式注入安全区避让
-        .frame(width: 300 + safeAreaInsets.leading)
+        .padding(.leading, realSafeAreaLeft) // 显式注入真实安全区避让
+        .frame(width: 300 + realSafeAreaLeft)
         .frame(maxHeight: .infinity)
         .background(Color.black.opacity(0.9))
     }
