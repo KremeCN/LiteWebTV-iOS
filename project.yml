@@ -20,11 +20,6 @@ targets:
       path: LiteWebTV/Info.plist
     sources:
       - path: LiteWebTV
-        excludes:
-          - Resources
-      - path: LiteWebTV/Resources
-        type: folder
-        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.kremecn.litewebtv
