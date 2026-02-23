@@ -113,14 +113,27 @@ jobs:
           APP_PATH=$(find build -name "LiteWebTV.app" -type d | head -1)
           mkdir -p Payload
           cp -r "$APP_PATH" Payload/
-          zip -r LiteWebTV.ipa Payload/
+          
+          # 默认名称
+          IPA_NAME="LiteWebTV.ipa"
+          
+          # 如果是 tag 触发，提取 tag 名并拼接到文件名中
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG_NAME=${GITHUB_REF#refs/tags/}
+            IPA_NAME="LiteWebTV-${TAG_NAME}.ipa"
+          fi
+          
+          zip -r "$IPA_NAME" Payload/
           rm -rf Payload/
+          
+          # 将生成的文件名保存到 GitHub Actions环境变量中供后续使用
+          echo "IPA_FILENAME=$IPA_NAME" >> $GITHUB_ENV
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
           name: LiteWebTV-iOS
-          path: LiteWebTV.ipa
+          path: ${{ env.IPA_FILENAME }}
 
       - name: Upload Simulator App (for Appetize.io)
         uses: actions/upload-artifact@v4
@@ -132,4 +145,4 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: LiteWebTV.ipa
+          files: ${{ env.IPA_FILENAME }}
