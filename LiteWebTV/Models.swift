@@ -31,16 +31,25 @@ struct ProgramItem: Codable, Identifiable {
         // 提取时分并根据时差换算
         let parts = time.split(separator: ":")
         if parts.count == 2, let h = Int(parts[0]), let m = Int(parts[1]) {
-            let offsetSeconds = localTZ.secondsFromGMT() - beijingTZ.secondsFromGMT()
+            // 使用当前日期构建一个完整的北京时间 Date
+            var calendar = Calendar.current
+            calendar.timeZone = beijingTZ
             
-            var totalMinutes = h * 60 + m + (offsetSeconds / 60)
-            totalMinutes = (totalMinutes % 1440 + 1440) % 1440 // 处理跨天绕回
+            let now = Date()
+            var components = calendar.dateComponents([.year, .month, .day], from: now)
+            components.hour = h
+            components.minute = m
+            components.second = 0
             
-            let localH = totalMinutes / 60
-            let localM = totalMinutes % 60
-            let localTimeStr = String(format: "%02d:%02d", localH, localM)
-            
-            return "\(time) (\(localTimeStr))"
+            if let beijingDate = calendar.date(from: components) {
+                // 将这个具体的 Date 转换回设备的本地时区进行格式化
+                let formatter = DateFormatter()
+                formatter.timeZone = localTZ
+                formatter.dateFormat = "HH:mm"
+                let localTimeStr = formatter.string(from: beijingDate)
+                
+                return "\(time) (\(localTimeStr))"
+            }
         }
         return time
     }
