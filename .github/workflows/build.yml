@@ -32,17 +32,8 @@ jobs:
             DEVELOPMENT_TEAM="" \
             -allowProvisioningUpdates
 
-      - name: List available Xcode versions
-        run: ls -d /Applications/Xcode*.app
-
-      - name: Build (Simulator - using older Xcode for Appetize.io)
+      - name: Build (Simulator)
         run: |
-          # 选择最旧的 Xcode 以降低 SDK 版本
-          OLDEST_XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | head -1)
-          echo "Using Xcode: $OLDEST_XCODE"
-          sudo xcode-select -s "$OLDEST_XCODE"
-          xcodebuild -version
-
           xcodebuild \
             -project LiteWebTV.xcodeproj \
             -scheme LiteWebTV \
@@ -53,35 +44,55 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO
 
-      - name: Diagnose Simulator App
+      - name: Run in iOS Simulator & Screenshot
         run: |
-          echo "=== Finding .app ==="
           SIM_APP_PATH=$(find build-sim -name "LiteWebTV.app" -type d | head -1)
-          echo "App path: $SIM_APP_PATH"
+          echo "App: $SIM_APP_PATH"
 
-          echo ""
-          echo "=== App bundle contents ==="
-          ls -la "$SIM_APP_PATH/"
+          # 找一个可用的 iPhone 模拟器
+          DEVICE_ID=$(xcrun simctl list devices available -j | \
+            python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          for runtime, devices in data['devices'].items():
+              if 'iOS' in runtime:
+                  for d in devices:
+                      if 'iPhone' in d['name'] and d['isAvailable']:
+                          print(d['udid'])
+                          sys.exit(0)
+          ")
+          echo "Using simulator: $DEVICE_ID"
 
-          echo ""
-          echo "=== Binary architecture ==="
-          BINARY="$SIM_APP_PATH/LiteWebTV"
-          if [ -f "$BINARY" ]; then
-            file "$BINARY"
-            lipo -info "$BINARY"
-          else
-            echo "ERROR: Binary not found at $BINARY"
-            echo "Looking for executables:"
-            find "$SIM_APP_PATH" -type f -perm +111
-          fi
+          # 启动模拟器
+          xcrun simctl boot "$DEVICE_ID" || true
+          sleep 5
 
-          echo ""
-          echo "=== Info.plist ==="
-          plutil -p "$SIM_APP_PATH/Info.plist"
+          # 安装 app
+          xcrun simctl install "$DEVICE_ID" "$SIM_APP_PATH"
 
-          echo ""
-          echo "=== CFBundleSupportedPlatforms ==="
-          plutil -extract CFBundleSupportedPlatforms json "$SIM_APP_PATH/Info.plist" -o - 2>/dev/null || echo "Key not found"
+          # 启动 app
+          xcrun simctl launch "$DEVICE_ID" com.kremecn.litewebtv
+          echo "App launched, waiting 15 seconds for splash screen + page load..."
+          sleep 15
+
+          # 截图 1: 可能还在开屏或刚加载完
+          xcrun simctl io "$DEVICE_ID" screenshot screenshot_15s.png
+          echo "Screenshot 1 captured at 15s"
+
+          # 再等 15 秒让视频加载
+          sleep 15
+          xcrun simctl io "$DEVICE_ID" screenshot screenshot_30s.png
+          echo "Screenshot 2 captured at 30s"
+
+          # 关闭模拟器
+          xcrun simctl shutdown "$DEVICE_ID" || true
+
+      - name: Upload Screenshots
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Simulator-Screenshots
+          path: screenshot_*.png
 
       - name: Package IPA (TrollStore)
         run: |
@@ -91,24 +102,11 @@ jobs:
           zip -r LiteWebTV.ipa Payload/
           rm -rf Payload/
 
-      - name: Package Simulator App (Appetize.io)
-        run: |
-          SIM_APP_PATH=$(find build-sim -name "LiteWebTV.app" -type d | head -1)
-          cd "$(dirname "$SIM_APP_PATH")"
-          zip -ry LiteWebTV-Simulator.zip "LiteWebTV.app"
-          mv LiteWebTV-Simulator.zip "$GITHUB_WORKSPACE/"
-
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
           name: LiteWebTV-iOS
           path: LiteWebTV.ipa
-
-      - name: Upload Simulator Zip (for Appetize.io)
-        uses: actions/upload-artifact@v4
-        with:
-          name: LiteWebTV-Simulator
-          path: LiteWebTV-Simulator.zip
 
       - name: Create Release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
