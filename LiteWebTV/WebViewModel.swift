@@ -115,18 +115,8 @@ final class WebViewModel: NSObject, ObservableObject {
             ["trigger": ["url-filter": ".*/fonts/"],
              "action": ["type": "block"]],
 
-            // 2. 图片资源拦截（每个扩展名单独一条规则）
-            ["trigger": ["url-filter": ".*\\.jpg"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*\\.jpeg"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*\\.png"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*\\.gif"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*\\.webp"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*\\.svg"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*\\.ico"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*\\.bmp"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*\\.avif"], "action": ["type": "block"]],
-
-            // 3. 统计追踪 & 广告 & 埋点
+            // 2. 统计追踪 & 广告 & 埋点
+            // 注意：不拦截图片！WKContentRuleList 无法区分网站 UI 图片和广告图片，
             ["trigger": ["url-filter": "hm\\.baidu\\.com"],
              "action": ["type": "block"]],
             ["trigger": ["url-filter": "tongji\\.baidu\\.com"],
