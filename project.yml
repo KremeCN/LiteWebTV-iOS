@@ -1,0 +1,35 @@
+name: LiteWebTV
+options:
+  bundleIdPrefix: com.kremecn
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "15.0"
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.9"
+    INFOPLIST_FILE: LiteWebTV/Info.plist
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_IDENTITY: ""
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGNING_ALLOWED: "NO"
+
+targets:
+  LiteWebTV:
+    type: application
+    platform: iOS
+    sources:
+      - path: LiteWebTV
+        excludes:
+          - Resources
+      - path: LiteWebTV/Resources
+        type: folder
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.kremecn.litewebtv
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: false

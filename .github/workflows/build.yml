@@ -1,0 +1,53 @@
+name: Build iOS IPA
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode Project
+        run: xcodegen generate
+
+      - name: Build
+        run: |
+          xcodebuild \
+            -project LiteWebTV.xcodeproj \
+            -scheme LiteWebTV \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_TEAM="" \
+            -allowProvisioningUpdates
+
+      - name: Package IPA
+        run: |
+          APP_PATH=$(find build -name "LiteWebTV.app" -type d | head -1)
+          mkdir -p Payload
+          cp -r "$APP_PATH" Payload/
+          zip -r LiteWebTV.ipa Payload/
+          rm -rf Payload/
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LiteWebTV-iOS
+          path: LiteWebTV.ipa
+
+      - name: Create Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: LiteWebTV.ipa
