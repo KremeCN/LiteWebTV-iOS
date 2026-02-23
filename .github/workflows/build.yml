@@ -32,17 +32,47 @@ jobs:
             DEVELOPMENT_TEAM="" \
             -allowProvisioningUpdates
 
-      - name: Build (Simulator - for Appetize.io)
+      - name: Build (Simulator)
         run: |
           xcodebuild \
             -project LiteWebTV.xcodeproj \
             -scheme LiteWebTV \
-            -destination 'generic/platform=iOS Simulator' \
+            -sdk iphonesimulator \
             -configuration Release \
             -derivedDataPath build-sim \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO
+
+      - name: Diagnose Simulator App
+        run: |
+          echo "=== Finding .app ==="
+          SIM_APP_PATH=$(find build-sim -name "LiteWebTV.app" -type d | head -1)
+          echo "App path: $SIM_APP_PATH"
+
+          echo ""
+          echo "=== App bundle contents ==="
+          ls -la "$SIM_APP_PATH/"
+
+          echo ""
+          echo "=== Binary architecture ==="
+          BINARY="$SIM_APP_PATH/LiteWebTV"
+          if [ -f "$BINARY" ]; then
+            file "$BINARY"
+            lipo -info "$BINARY"
+          else
+            echo "ERROR: Binary not found at $BINARY"
+            echo "Looking for executables:"
+            find "$SIM_APP_PATH" -type f -perm +111
+          fi
+
+          echo ""
+          echo "=== Info.plist ==="
+          plutil -p "$SIM_APP_PATH/Info.plist"
+
+          echo ""
+          echo "=== CFBundleSupportedPlatforms ==="
+          plutil -extract CFBundleSupportedPlatforms json "$SIM_APP_PATH/Info.plist" -o - 2>/dev/null || echo "Key not found"
 
       - name: Package IPA (TrollStore)
         run: |
@@ -56,7 +86,8 @@ jobs:
         run: |
           SIM_APP_PATH=$(find build-sim -name "LiteWebTV.app" -type d | head -1)
           cd "$(dirname "$SIM_APP_PATH")"
-          tar -czf "$GITHUB_WORKSPACE/LiteWebTV-Simulator.tar.gz" "LiteWebTV.app"
+          zip -ry LiteWebTV-Simulator.zip "LiteWebTV.app"
+          mv LiteWebTV-Simulator.zip "$GITHUB_WORKSPACE/"
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
@@ -64,15 +95,14 @@ jobs:
           name: LiteWebTV-iOS
           path: LiteWebTV.ipa
 
-      - name: Upload Simulator App (for Appetize.io)
+      - name: Upload Simulator Zip (for Appetize.io)
         uses: actions/upload-artifact@v4
         with:
           name: LiteWebTV-Simulator
-          path: LiteWebTV-Simulator.tar.gz
+          path: LiteWebTV-Simulator.zip
 
       - name: Create Release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: LiteWebTV.ipa
-
