@@ -2,6 +2,8 @@ import SwiftUI
 
 @main
 struct LiteWebTVApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -9,6 +11,13 @@ struct LiteWebTVApp: App {
                 .modifier(HideOverlaysModifier())
                 .statusBarHidden(true)
         }
+    }
+}
+
+class AppDelegate: NSObject, UIApplicationDelegate {
+    // 强制全局横屏，防止 SwiftUI 偶尔忽略 Info.plist 的设置
+    func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
+        return .landscape
     }
 }
 
