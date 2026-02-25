@@ -306,42 +306,36 @@
     // ==========================================
     // 7. 节目单时区修正 (强制对齐北京时间)
     // ==========================================
-    let _lastFixedTitle = "";
+    let _lastTzFixTs = 0;
     addTask('timezoneFix', () => {
-        const titleEl = document.querySelector('.tv-zhan-title');
-        if (!titleEl) return false;
-        const currentTitle = titleEl.textContent.trim();
-
         const dayTabs = document.querySelectorAll('.tv-zhan-list-week-item');
         if (dayTabs.length === 0) return false;
 
-        // 检查当前高亮的 Tab 是否存在
+        // 检查当前高亮的 Tab
         const curTab = Array.from(dayTabs).find(tb => tb.classList.contains('cur'));
-        if (!curTab) return false;
 
         // 计算当前北京时间 (UTC+8)
         const now = new Date();
         const bjTime = new Date(now.getTime() + (now.getTimezoneOffset() - (-480)) * 60000);
         const m = (bjTime.getMonth() + 1).toString().padStart(2, '0');
         const d = bjTime.getDate().toString().padStart(2, '0');
-        const bjDateStr = `${m}/${d}`; // 例如 "02/24"
+        const bjDateStr = `${m}/${d}`;
+        const targetTab = Array.from(dayTabs).find(tb => tb.textContent.includes(bjDateStr));
+        if (!targetTab) return false;
 
-        // 如果当前高亮的 tab 已经是北京当天的 tab，可以直接记录状态并跳过
-        if (curTab.textContent.includes(bjDateStr)) {
-            _lastFixedTitle = currentTitle;
+        if (curTab && curTab.textContent.includes(bjDateStr)) {
             return false;
         }
 
-        // 如果发生了切台（标题变了，且高亮不对），我们需要帮它纠正
-        if (currentTitle !== _lastFixedTitle) {
-            for (const tab of dayTabs) {
-                if (tab.textContent.includes(bjDateStr)) {
-                    tab.click();
-                    _lastFixedTitle = currentTitle;
-                    break;
-                }
-            }
+        // 节流点击，避免某些机型上重复触发导致抖动
+        const nowTs = Date.now();
+        if (nowTs - _lastTzFixTs < 1000) {
+            return false;
         }
+
+        targetTab.click();
+        _lastTzFixTs = nowTs;
+
         return false; // 永久监听
     });
 

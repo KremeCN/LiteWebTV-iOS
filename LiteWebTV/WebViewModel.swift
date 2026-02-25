@@ -26,6 +26,7 @@ final class WebViewModel: NSObject, ObservableObject {
 
     private let targetURL = "https://www.yangshipin.cn/tv/home"
     private let pcUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    private let beijingTimeZone = TimeZone(identifier: "Asia/Shanghai")!
 
     /// 换台防抖保护（3 秒）
     private let switchDelay: TimeInterval = 3.0
@@ -33,6 +34,7 @@ final class WebViewModel: NSObject, ObservableObject {
 
     /// 换台开始时间，用于过滤旧视频的播放信号
     private var switchStartTime: Date = .distantPast
+    private var scheduleTicker: AnyCancellable?
 
     // MARK: - WebView
 
@@ -50,6 +52,12 @@ final class WebViewModel: NSObject, ObservableObject {
         loadScripts()
         configureWebView()
         loadTargetPage()
+        startScheduleTicker()
+    }
+
+    deinit {
+        scheduleTicker?.cancel()
+        webView?.configuration.userContentController.removeScriptMessageHandler(forName: "bridge")
     }
 
     // MARK: - Script Loading
@@ -191,6 +199,14 @@ final class WebViewModel: NSObject, ObservableObject {
     private func loadTargetPage() {
         guard let url = URL(string: targetURL) else { return }
         webView.load(URLRequest(url: url))
+    }
+
+    private func startScheduleTicker() {
+        scheduleTicker = Timer.publish(every: 30, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                self?.refreshCurrentProgram(using: nil)
+            }
     }
 
     // MARK: - Script Injection
@@ -376,40 +392,10 @@ extension WebViewModel: WKScriptMessageHandler {
             case "programList":
                 guard let jsonString = body["data"] as? String,
                       let data = jsonString.data(using: .utf8),
-                      var list = try? JSONDecoder().decode([ProgramItem].self, from: data)
+                      let list = try? JSONDecoder().decode([ProgramItem].self, from: data)
                 else { return }
 
-                // 废弃原网页不靠谱的 isCurrent (受海外浏览器时区干扰)
-                // 在 Swift 中用绝对的北京时间重新计算当前节目
-                var calendar = Calendar.current
-                calendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
-                let now = Date()
-                let currentH = calendar.component(.hour, from: now)
-                let currentM = calendar.component(.minute, from: now)
-                let currentTotalMinutes = currentH * 60 + currentM
-                
-                var activeIndex = -1
-                for i in 0..<list.count {
-                    list[i].isCurrent = false // 强制清空错误的高亮
-                    
-                    let parts = list[i].time.split(separator: ":")
-                    if parts.count == 2, let h = Int(parts[0]), let m = Int(parts[1]) {
-                        let progTotalMinutes = h * 60 + m
-                        if progTotalMinutes <= currentTotalMinutes {
-                            activeIndex = i
-                        }
-                    }
-                }
-                
-                if activeIndex >= 0 && activeIndex < list.count {
-                    list[activeIndex].isCurrent = true
-                } else if !list.isEmpty {
-                    list[list.count - 1].isCurrent = true // 跨午夜前的后备安全措施
-                    activeIndex = list.count - 1
-                }
-
-                self.programs = list
-                self.currentProgramIndex = max(0, activeIndex)
+                self.refreshCurrentProgram(using: list)
 
             case "title":
                 // 废弃原网页不靠谱的 title（受海外浏览器时区干扰）
@@ -432,5 +418,61 @@ extension WebViewModel: WKScriptMessageHandler {
                 break
             }
         }
+    }
+
+    private func refreshCurrentProgram(using incomingList: [ProgramItem]?) {
+        var list = incomingList ?? programs
+        guard !list.isEmpty else {
+            programs = []
+            currentProgramIndex = 0
+            return
+        }
+
+        let nowMinutes = currentBeijingMinutes()
+        let activeIndex = activeProgramIndex(in: list, nowMinutes: nowMinutes) ?? max(0, list.count - 1)
+
+        for idx in list.indices {
+            list[idx].isCurrent = (idx == activeIndex)
+        }
+
+        programs = list
+        currentProgramIndex = activeIndex
+
+        if activeIndex < list.count {
+            let nextTitle = list[activeIndex].title
+            if currentTitle != nextTitle {
+                currentTitle = nextTitle
+            }
+        }
+    }
+
+    private func currentBeijingMinutes() -> Int {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = beijingTimeZone
+        let now = Date()
+        return calendar.component(.hour, from: now) * 60 + calendar.component(.minute, from: now)
+    }
+
+    private func activeProgramIndex(in list: [ProgramItem], nowMinutes: Int) -> Int? {
+        var lastIndex: Int?
+        for (index, item) in list.enumerated() {
+            guard let minutes = parseTimeToMinutes(item.time) else { continue }
+            if minutes <= nowMinutes {
+                lastIndex = index
+            }
+        }
+        return lastIndex
+    }
+
+    private func parseTimeToMinutes(_ text: String) -> Int? {
+        let parts = text.split(separator: ":")
+        guard parts.count == 2,
+              let h = Int(parts[0]),
+              let m = Int(parts[1]),
+              h >= 0, h <= 23,
+              m >= 0, m <= 59 else {
+            return nil
+        }
+        return h * 60 + m
     }
 }
