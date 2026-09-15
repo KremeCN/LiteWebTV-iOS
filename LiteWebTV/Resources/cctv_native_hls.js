@@ -4,7 +4,7 @@
     window.__lwtvNativeHls = true;
 
     var attached = false;
-    var tries = 0;
+    var originalPlay = null;
 
     function post(msg) {
         try {
@@ -63,26 +63,53 @@
         return document.querySelector('video[id^="h5player_"]') || document.querySelector('video');
     }
 
-    function attach() {
-        if (attached) return true;
+    function bindReveal(video) {
+        if (!video || video.__lwtvRevealBound) return;
+        video.__lwtvRevealBound = true;
+        video.addEventListener('loadedmetadata', revealIfDecoded);
+        video.addEventListener('canplay', revealIfDecoded);
+        video.addEventListener('playing', revealIfDecoded);
+        video.addEventListener('resize', revealIfDecoded);
+    }
+
+    function revealIfDecoded() {
+        var video = targetVideo();
+        if (!video || video.videoWidth < 2) return;
+        video.style.setProperty('display', 'block', 'important');
+        document.querySelectorAll('[id^="error_msg_"]').forEach(function (el) {
+            el.style.setProperty('display', 'none', 'important');
+        });
+        if (video.paused && originalPlay) {
+            var playing = originalPlay.call(video);
+            if (playing && typeof playing.catch === 'function') playing.catch(function () { });
+        }
+        if (!video.__lwtvRevealed) {
+            video.__lwtvRevealed = true;
+            post('native hls revealed ' + video.videoWidth + 'x' + video.videoHeight);
+        }
+        if (window.Android && window.Android.dismissSplash) {
+            window.Android.dismissSplash();
+        }
+    }
+
+    function attachSrc() {
         var url = playerUrl();
         var video = targetVideo();
-        if (!url || !video) return false;
+        if (!video) return false;
         if (hasMedia(video)) {
             attached = true;
+            bindReveal(video);
             return true;
         }
+        if (!url) return false;
         try {
             video.setAttribute('playsinline', '');
-            video.setAttribute('webkit-playsinline', 'webkit-playsinline');
+            video.setAttribute('webkit-playsinline', '');
             video.src = url;
             if (typeof video.load === 'function') video.load();
-            var playing = video.play();
-            if (playing && typeof playing.catch === 'function') {
-                playing.catch(function () { });
-            }
             attached = true;
-            post('native hls attached');
+            bindReveal(video);
+            post('native hls src assigned');
             return true;
         } catch (e) {
             post('native hls attach failed');
@@ -90,40 +117,62 @@
         }
     }
 
+    function canStart(media) {
+        return hasMedia(media) && media.readyState >= 3;
+    }
+
     var proto = window.HTMLMediaElement && window.HTMLMediaElement.prototype;
     if (proto && !proto.__lwtvPlayWrapped) {
-        var originalPlay = proto.play;
+        originalPlay = proto.play;
         proto.play = function () {
-            if (hasMedia(this)) {
-                return originalPlay.apply(this, arguments);
-            }
-            attach();
-            if (hasMedia(this)) {
-                return originalPlay.apply(this, arguments);
-            }
             var self = this;
-            return new Promise(function (resolve, reject) {
-                var n = 0;
+            var args = arguments;
+            attachSrc();
+            if (canStart(self)) {
+                return originalPlay.apply(self, args);
+            }
+            if (self.__lwtvPlayWait) return self.__lwtvPlayWait;
+            self.__lwtvPlayWait = new Promise(function (resolve, reject) {
+                var settled = false;
+                function finishOk(next) {
+                    if (settled) return;
+                    settled = true;
+                    self.__lwtvPlayWait = null;
+                    if (next && typeof next.then === 'function') next.then(resolve, reject);
+                    else resolve();
+                }
+                function tryStart() {
+                    attachSrc();
+                    if (!canStart(self)) return false;
+                    finishOk(originalPlay.apply(self, args));
+                    return true;
+                }
+                function onReady() {
+                    if (tryStart()) {
+                        self.removeEventListener('canplay', onReady);
+                        self.removeEventListener('loadeddata', onReady);
+                    }
+                }
+                self.addEventListener('canplay', onReady);
+                self.addEventListener('loadeddata', onReady);
                 var timer = setInterval(function () {
-                    n += 1;
-                    attach();
-                    if (hasMedia(self)) {
+                    if (tryStart() || settled) {
                         clearInterval(timer);
-                        var next = originalPlay.apply(self, arguments);
-                        if (next && typeof next.then === 'function') next.then(resolve, reject);
-                        else resolve();
-                    } else if (n > 40) {
-                        clearInterval(timer);
-                        reject(new Error('no media src'));
+                        self.removeEventListener('canplay', onReady);
+                        self.removeEventListener('loadeddata', onReady);
                     }
                 }, 50);
             });
+            return self.__lwtvPlayWait;
         };
         proto.__lwtvPlayWrapped = true;
     }
 
-    var poll = setInterval(function () {
-        tries += 1;
-        if (attach() || tries > 80) clearInterval(poll);
-    }, 50);
+    function tick() {
+        attachSrc();
+        revealIfDecoded();
+        var decoded = targetVideo() && targetVideo().videoWidth > 1;
+        setTimeout(tick, decoded ? 1000 : 50);
+    }
+    tick();
 })();
