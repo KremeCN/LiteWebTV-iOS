@@ -3,9 +3,23 @@ import WebKit
 
 /// 判断当前设备是否适合加载央视频网页播放器（依赖 MSE / ManagedMediaSource）。
 enum SourceCapability {
+    /// 只认「类存在」会在 iOS 模拟器上误判：ManagedMediaSource 在，但 MP4 `isTypeSupported` 为假，hls.js 实际播不了。
     private static let probeScript = """
     (function() {
-        return !!(window.MediaSource || window.WebKitMediaSource || window.ManagedMediaSource);
+        var mime = 'video/mp4; codecs="avc1.42E01E,mp4a.40.2"';
+        var sources = [window.ManagedMediaSource, window.MediaSource, window.WebKitMediaSource];
+        for (var i = 0; i < sources.length; i++) {
+            var MS = sources[i];
+            if (!MS) continue;
+            try {
+                if (typeof MS.isTypeSupported === 'function') {
+                    if (MS.isTypeSupported(mime)) return true;
+                    continue;
+                }
+                return true;
+            } catch (e) {}
+        }
+        return false;
     })();
     """
 

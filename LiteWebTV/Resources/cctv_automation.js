@@ -1,9 +1,8 @@
 (function () {
     'use strict';
 
-    try {
-        window.showNoDrmMsg = function () { return false; };
-    } catch (e) {}
+    try { window.showNoDrmMsg = function () { return false; }; } catch (e) {}
+    try { window.isIosDrmPlayer = function () { return false; }; } catch (e) {}
 
     // 画质优先级：选菜单里实际存在的最高档（网页直播常见最高为「超清」）
     var QUALITY_TIERS = [
@@ -265,6 +264,24 @@
     addTask('fullscreen', function () {
         applyFullscreenPlayer();
         return !!document.querySelector('video');
+    });
+
+    addTask('videoDebug', function () {
+        var video = document.querySelector('video');
+        if (!video) return false;
+        function describe() {
+            var err = video.error;
+            return 'src=' + (video.currentSrc || video.src || '')
+                + ' ready=' + video.readyState
+                + ' paused=' + video.paused
+                + ' t=' + (video.currentTime || 0).toFixed(2)
+                + (err ? (' error=' + err.code) : '');
+        }
+        postConsole('log', '[CCTV] video ' + describe());
+        video.addEventListener('error', function () {
+            postConsole('error', '[CCTV] video error ' + describe());
+        });
+        return true;
     });
 
     addTask('videoMonitor', function () {
