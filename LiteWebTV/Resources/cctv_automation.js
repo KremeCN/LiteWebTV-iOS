@@ -70,6 +70,9 @@
     }
 
     function applyFullscreenPlayer() {
+        var video = document.querySelector('video');
+        if (!video) return false;
+
         var changed = false;
         var ids = ['player', 'html5Player', 'html5Player_live', 'html5VideoBack', 'html5ControlDiv'];
         ids.forEach(function (id) {
@@ -83,14 +86,12 @@
             changed = true;
         }
 
-        var video = document.querySelector('video');
-        if (video) {
-            if (applyStyleOnce(video, VIDEO_STYLE)) {
-                changed = true;
-            }
-            video.setAttribute('playsinline', 'true');
-            video.setAttribute('webkit-playsinline', 'true');
+        if (applyStyleOnce(video, VIDEO_STYLE)) {
+            changed = true;
         }
+        video.setAttribute('playsinline', 'true');
+        video.setAttribute('webkit-playsinline', 'true');
+        try { video.disableRemotePlayback = true; } catch (e) {}
         return changed;
     }
 
@@ -234,8 +235,7 @@
         disableAllInputs();
         hidePageChrome();
         applyFullscreenPlayer();
-        var hasPlayer = !!(document.getElementById('player') || document.querySelector('video'));
-        return hasPlayer;
+        return true;
     });
 
     addTask('autoPlay', function () {

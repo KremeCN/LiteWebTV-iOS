@@ -18,4 +18,11 @@ enum SourcePreferenceStore {
         dict[channelId] = source.rawValue
         UserDefaults.standard.set(dict, forKey: key)
     }
+
+    private static let lastChannelKey = "last_logical_channel_id"
+
+    static var lastChannelId: String? {
+        get { UserDefaults.standard.string(forKey: lastChannelKey) }
+        set { UserDefaults.standard.set(newValue, forKey: lastChannelKey) }
+    }
 }
