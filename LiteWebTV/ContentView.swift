@@ -87,6 +87,10 @@ struct ContentView: View {
                 // Layer 1: WebView
                 WebViewContainer(webView: viewModel.webView)
 
+                HiddenSystemVolumeView()
+                    .frame(width: 1, height: 1)
+                    .allowsHitTesting(false)
+
                 // Layer 2: Gesture detection overlay
                 gestureLayer(in: geo)
 
@@ -309,7 +313,7 @@ struct ContentView: View {
                         showAdjustIndicator = true
                     } else if touchStartX > screenWidth * zoneRightStart {
                         dragMode = .volume
-                        adjustIndicatorText = "🔊 \(currentVolumePercent)%"
+                        adjustIndicatorText = "🔊 \(SystemVolume.shared.percent)%"
                         showAdjustIndicator = true
                     } else {
                         dragMode = .gesture
@@ -432,31 +436,9 @@ struct ContentView: View {
 
     // MARK: - Volume & Brightness
 
-    private var currentVolumePercent: Int {
-        // iOS 不允许直接读取系统音量，使用估算值
-        50
-    }
-
     private func adjustVolume(_ deltaPercent: CGFloat) {
-        // iOS 系统音量通过 MPVolumeView 控制
-        // 简化实现：通过 JS 控制页面内 video 元素音量
-        let js = """
-        (function(){
-            var video = document.querySelector('video');
-            if(video){
-                video.volume = Math.min(1.0, Math.max(0.0, video.volume + \(deltaPercent)));
-                return Math.round(video.volume * 100);
-            }
-            return -1;
-        })();
-        """
-        viewModel.webView.evaluateJavaScript(js) { result, _ in
-            if let percent = result as? Int, percent >= 0 {
-                DispatchQueue.main.async {
-                    adjustIndicatorText = "🔊 \(percent)%"
-                }
-            }
-        }
+        let next = SystemVolume.shared.adjust(by: Float(deltaPercent))
+        adjustIndicatorText = "🔊 \(Int((next * 100).rounded()))%"
     }
 
     private func adjustBrightness(_ deltaPercent: CGFloat) {

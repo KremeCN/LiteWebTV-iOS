@@ -24,6 +24,14 @@ struct LiteWebTVApp: App {
 }
 
 class AppDelegate: NSObject, UIApplicationDelegate {
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+    ) -> Bool {
+        SystemVolume.shared.activateSession()
+        return true
+    }
+
     // 强制全局横屏，防止 SwiftUI 偶尔忽略 Info.plist 的设置
     func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
         return .landscape

@@ -22,6 +22,10 @@ targets:
         UILaunchScreen: {}
     sources:
       - path: LiteWebTV
+    dependencies:
+      - sdk: MediaPlayer.framework
+      - sdk: AVFoundation.framework
+      - sdk: WebKit.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.kremecn.litewebtv
