@@ -61,18 +61,34 @@
         return '';
     }
 
-    function targetVideo() {
-        var videos = document.querySelectorAll('video');
-        var best = null;
-        for (var i = 0; i < videos.length; i++) {
-            if (!hasMedia(videos[i])) continue;
-            if (!best || videos[i].videoWidth > best.videoWidth) best = videos[i];
-        }
-        return best || document.querySelector('video[id^="h5player_"]') || videos[0] || null;
+    function allVideos() {
+        return Array.prototype.slice.call(document.querySelectorAll('video'));
     }
 
-    function hasDecodedFrame(video) {
-        return !!(video && video.videoWidth > 1 && video.readyState >= 2);
+    function isActiveStream(video) {
+        if (!video || !hasMedia(video)) return false;
+        if (video.readyState >= 2 && (video.videoWidth > 1 || !video.paused)) return true;
+        if (!video.paused && video.readyState >= 1) return true;
+        return false;
+    }
+
+    function targetVideo(preferred) {
+        if (preferred && isActiveStream(preferred)) return preferred;
+        var videos = allVideos();
+        var best = null;
+        var bestScore = -1;
+        for (var i = 0; i < videos.length; i++) {
+            var video = videos[i];
+            if (!hasMedia(video)) continue;
+            var score = (video.videoWidth || 0) + (video.paused ? 0 : 10000) + (video.readyState * 10);
+            if (score > bestScore) {
+                best = video;
+                bestScore = score;
+            }
+        }
+        if (best) return best;
+        if (preferred) return preferred;
+        return document.querySelector('video[id^="h5player_"]') || videos[0] || null;
     }
 
     function quietAutoplay(video) {
@@ -80,33 +96,73 @@
         try {
             video.autoplay = false;
             video.removeAttribute('autoplay');
-            video.setAttribute('playsinline', '');
-            video.setAttribute('webkit-playsinline', '');
-            video.setAttribute('x5-playsinline', 'true');
+            video.setAttribute('playsinline', 'true');
+            video.setAttribute('webkit-playsinline', 'true');
+            video.playsInline = true;
         } catch (e) { }
     }
 
-    function hideFalseOverlay() {
-        document.querySelectorAll('[id^="error_msg_"]').forEach(function (el) {
-            el.style.setProperty('display', 'none', 'important');
-            el.style.setProperty('visibility', 'hidden', 'important');
-            el.style.setProperty('opacity', '0', 'important');
-            el.style.setProperty('pointer-events', 'none', 'important');
-        });
+    function ensureStyle() {
+        if (document.getElementById('lwtv-cctv-surface')) return;
+        var style = document.createElement('style');
+        style.id = 'lwtv-cctv-surface';
+        style.textContent = [
+            'html.lwtv-cctv-playing video[id^="h5player_"],',
+            'html.lwtv-cctv-playing video[src*=".m3u8"] {',
+            '  display: block !important;',
+            '  visibility: visible !important;',
+            '  opacity: 1 !important;',
+            '  position: fixed !important;',
+            '  left: 0 !important;',
+            '  top: 0 !important;',
+            '  width: 100% !important;',
+            '  height: 100% !important;',
+            '  z-index: 2147483647 !important;',
+            '  object-fit: contain !important;',
+            '  background: #000 !important;',
+            '}',
+            'html.lwtv-cctv-playing [id^="error_msg_"],',
+            'html.lwtv-cctv-playing [id^="h5canvas_"],',
+            'html.lwtv-cctv-playing [id^="jump_to_app_"],',
+            'html.lwtv-cctv-playing [id^="logo_"],',
+            'html.lwtv-cctv-playing [id^="loading_"] {',
+            '  display: none !important;',
+            '  visibility: hidden !important;',
+            '  opacity: 0 !important;',
+            '  pointer-events: none !important;',
+            '}'
+        ].join('\n');
+        (document.head || document.documentElement).appendChild(style);
     }
 
-    function revealIfDecoded() {
-        var video = targetVideo();
-        if (!hasDecodedFrame(video)) return false;
-        recovering = true;
-        hideFalseOverlay();
+    function surfaceVideo(video) {
+        ensureStyle();
+        document.documentElement.classList.add('lwtv-cctv-playing');
+        try {
+            if (document.body && video.parentElement !== document.body) {
+                document.body.appendChild(video);
+            }
+        } catch (e) { }
         try {
             video.style.setProperty('display', 'block', 'important');
             video.style.setProperty('visibility', 'visible', 'important');
             video.style.setProperty('opacity', '1', 'important');
+            video.style.setProperty('position', 'fixed', 'important');
+            video.style.setProperty('left', '0', 'important');
+            video.style.setProperty('top', '0', 'important');
             video.style.setProperty('width', '100%', 'important');
             video.style.setProperty('height', '100%', 'important');
+            video.style.setProperty('z-index', '2147483647', 'important');
+            video.style.setProperty('object-fit', 'contain', 'important');
+            video.style.setProperty('background', '#000', 'important');
         } catch (e) { }
+    }
+
+    function revealIfDecoded(preferred) {
+        var video = targetVideo(preferred);
+        if (!isActiveStream(video)) return false;
+        recovering = true;
+        surfaceVideo(video);
         if (video.paused && originalPlay) {
             try {
                 var playing = originalPlay.call(video);
@@ -115,7 +171,7 @@
         }
         if (!video.__lwtvRevealed) {
             video.__lwtvRevealed = true;
-            post('native hls revealed ' + video.videoWidth + 'x' + video.videoHeight + ' paused=' + video.paused);
+            post('native hls revealed ' + video.videoWidth + 'x' + video.videoHeight + ' paused=' + video.paused + ' ready=' + video.readyState);
         }
         if (window.Android && window.Android.dismissSplash) {
             window.Android.dismissSplash();
@@ -126,19 +182,21 @@
     function bindReveal(video) {
         if (!video || video.__lwtvRevealBound) return;
         video.__lwtvRevealBound = true;
-        ['loadedmetadata', 'loadeddata', 'canplay', 'playing', 'resize', 'timeupdate'].forEach(function (name) {
+        ['loadedmetadata', 'loadeddata', 'canplay', 'playing', 'resize', 'timeupdate', 'stalled'].forEach(function (name) {
             video.addEventListener(name, function () {
-                try { revealIfDecoded(); } catch (e) { }
+                try { revealIfDecoded(video); } catch (e) { }
             });
         });
     }
 
     function attachSrc() {
+        allVideos().forEach(function (video) {
+            quietAutoplay(video);
+            bindReveal(video);
+        });
         var url = playerUrl();
         var video = targetVideo();
-        if (!video) {
-            video = document.querySelector('video');
-        }
+        if (!video) video = document.querySelector('video');
         if (!video) return false;
         quietAutoplay(video);
         bindReveal(video);
@@ -174,7 +232,7 @@
             var args = arguments;
             quietAutoplay(self);
             attachSrc();
-            if (canStart(self) || hasDecodedFrame(self)) {
+            if (canStart(self) || isActiveStream(self)) {
                 return originalPlay.apply(self, args);
             }
             if (self.__lwtvPlayWait) return self.__lwtvPlayWait;
@@ -189,7 +247,7 @@
                 }
                 function tryStart() {
                     attachSrc();
-                    if (!(canStart(self) || hasDecodedFrame(self))) return false;
+                    if (!(canStart(self) || isActiveStream(self))) return false;
                     try {
                         finishOk(originalPlay.apply(self, args));
                     } catch (e) {
@@ -216,7 +274,7 @@
             return self.__lwtvPlayWait;
         };
         proto.pause = function () {
-            if (recovering && hasDecodedFrame(this)) return;
+            if (recovering || isActiveStream(this)) return;
             return originalPause.apply(this, arguments);
         };
         proto.__lwtvPlayWrapped = true;
@@ -224,12 +282,11 @@
 
     function tick() {
         try {
-            document.querySelectorAll('video').forEach(quietAutoplay);
+            ensureStyle();
             attachSrc();
-            revealIfDecoded();
+            allVideos().forEach(function (video) { revealIfDecoded(video); });
         } catch (e) { }
-        var decoded = hasDecodedFrame(targetVideo());
-        setTimeout(tick, decoded ? 400 : 50);
+        setTimeout(tick, recovering ? 400 : 50);
     }
     tick();
 
@@ -241,9 +298,8 @@
             setTimeout(function () {
                 scheduled = false;
                 try {
-                    document.querySelectorAll('video').forEach(quietAutoplay);
                     attachSrc();
-                    revealIfDecoded();
+                    allVideos().forEach(function (video) { revealIfDecoded(video); });
                 } catch (e) { }
             }, 0);
         }
