@@ -27,8 +27,10 @@ final class WebViewModel: NSObject, ObservableObject {
 
     private let yangshipinURL = "https://www.yangshipin.cn/tv/home"
     private let pcUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    /// 不含 Mobile / iPhone / iPad：避免跳转 /m/，也避免 liveplayer 把 iOS 当成平板后弹出「请使用电脑端」。
-    private let cctvUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15"
+    /// 央视网 liveplayer：`isIPad()` 为真才会走 HTML5（iPhone/iPad UA）；
+    /// 同时不能带 `Mobile`，否则页面脚本会跳到 `/m/`。
+    /// Macintosh Safari 会被判定成不支持的桌面浏览器。
+    private let cctvUserAgent = "Mozilla/5.0 (iPad; CPU OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/604.1"
     private let beijingTimeZone = TimeZone(identifier: "Asia/Shanghai")!
 
     private let switchDelay: TimeInterval = 3.0
@@ -115,6 +117,13 @@ final class WebViewModel: NSObject, ObservableObject {
 
         let contentController = WKUserContentController()
         contentController.add(self, name: "bridge")
+        contentController.addUserScript(
+            WKUserScript(
+                source: cctvPlayerCompatScript,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: false
+            )
+        )
         config.userContentController = contentController
 
         config.mediaTypesRequiringUserActionForPlayback = []
@@ -129,6 +138,31 @@ final class WebViewModel: NSObject, ObservableObject {
         webView.scrollView.backgroundColor = .black
 
         installContentRules()
+    }
+
+    /// 在 liveplayer.js 执行前锁住 `showNoDrmMsg`。
+    /// iPad UA 会走 HTML5，但无 hls.js 时该函数会弹出「请使用电脑端或客户端」。
+    /// `atDocumentStart` 时空 hostname 也要锁，避免脚本尚未就绪时漏过。
+    private var cctvPlayerCompatScript: String {
+        """
+        (function() {
+            var host = String(location.hostname || '').toLowerCase();
+            if (host.indexOf('yangshipin') !== -1) {
+                return;
+            }
+            function deny() { return false; }
+            try {
+                Object.defineProperty(window, 'showNoDrmMsg', {
+                    configurable: false,
+                    enumerable: false,
+                    writable: false,
+                    value: deny
+                });
+            } catch (e) {
+                try { window.showNoDrmMsg = deny; } catch (e2) {}
+            }
+        })();
+        """
     }
 
     // MARK: - Playback Routing
