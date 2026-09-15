@@ -34,6 +34,8 @@
         var video = document.querySelector('video');
         if (!video) return false;
         if (!video.paused) return true;
+        var src = video.getAttribute('src') || '';
+        if (src.length < 8) return false;
         var playPromise = video.play();
         if (playPromise && typeof playPromise.then === 'function') {
             playPromise.catch(function (err) {

@@ -46,8 +46,10 @@ final class WebViewModel: NSObject, ObservableObject {
 
     private var activeCctvSlug: String?
     private var pendingYangshipinDomIndex: Int?
-    /// 央视频频道点击必须发生在 `setAllMediaPlaybackSuspended(false)` 之后，否则 MSE 会卡在暂停态。
+    /// 央视频频道点击必须发生在 CCTV 被挂起之后，避免两路声音叠在一起。
     private var yangshipinReadyToClick = false
+    /// 首页若在 WK 媒体挂起/后台态下初始化，后续点台会变成网站的「请求参数错误」。
+    private var yangshipinDidInitInBackground = false
     private var yangshipinBootstrapInProgress = false
     private var yangshipinBootstrapTimeoutTask: DispatchWorkItem?
     private var hasAppliedLaunchChannel = false
@@ -79,6 +81,7 @@ final class WebViewModel: NSObject, ObservableObject {
     private var automationScript = ""
     private var cctvAutomationScript = ""
     private var cctvProbeScript = ""
+    private var cctvNativeHlsScript = ""
 
     override init() {
         super.init()
@@ -203,6 +206,10 @@ final class WebViewModel: NSObject, ObservableObject {
            let content = try? String(contentsOf: url, encoding: .utf8) {
             cctvProbeScript = content
         }
+        if let url = Bundle.main.url(forResource: "cctv_native_hls", withExtension: "js"),
+           let content = try? String(contentsOf: url, encoding: .utf8) {
+            cctvNativeHlsScript = content
+        }
     }
 
     private func configureWebViews() {
@@ -227,6 +234,11 @@ final class WebViewModel: NSObject, ObservableObject {
         controller.add(self, name: "bridge")
         controller.add(self, name: "diag")
         if kind == .cctv || kind == .probe {
+            if !cctvNativeHlsScript.isEmpty {
+                controller.addUserScript(
+                    WKUserScript(source: cctvNativeHlsScript, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+                )
+            }
             if kind == .probe {
                 controller.addUserScript(
                     WKUserScript(
@@ -385,6 +397,13 @@ final class WebViewModel: NSObject, ObservableObject {
         yangshipinWebView.load(URLRequest(url: url))
     }
 
+    private func pauseMedia(in webView: WKWebView) {
+        webView.evaluateJavaScript(
+            "document.querySelectorAll('video,audio').forEach(function(m){ try { m.pause(); } catch(e) {} });",
+            completionHandler: nil
+        )
+    }
+
     private func suspend(
         _ webView: WKWebView,
         label: String,
@@ -393,6 +412,13 @@ final class WebViewModel: NSObject, ObservableObject {
     ) {
         webView.requestMediaPlaybackState { [weak self] state in
             self?.diagnostics.log("media", "state before suspend \(label) raw=\(state.rawValue)")
+        }
+        // 央视频的取流签名会在 `setAllMediaPlaybackSuspended(true)` 期间失效，后台只暂停 DOM 媒体。
+        if webView === yangshipinWebView {
+            pauseMedia(in: webView)
+            diagnostics.log("media", "paused \(label) via js")
+            completion()
+            return
         }
         webView.setAllMediaPlaybackSuspended(true) { [weak self] in
             if closePresentations {
@@ -510,8 +536,14 @@ final class WebViewModel: NSObject, ObservableObject {
 
     private func loadYangshipinChannel(domIndex: Int) {
         pendingYangshipinDomIndex = domIndex
-        if yangshipinWebView.url?.host?.contains("yangshipin.cn") != true {
+        let needsReload = yangshipinDidInitInBackground
+            || yangshipinWebView.url?.host?.contains("yangshipin.cn") != true
+        if needsReload {
+            yangshipinDidInitInBackground = false
+            diagnostics.log("session", "reload yangshipin after background init")
             loadYangshipinHome()
+        } else if yangshipinReadyToClick {
+            flushPendingYangshipinClick()
         }
     }
 
@@ -519,7 +551,8 @@ final class WebViewModel: NSObject, ObservableObject {
         guard yangshipinReadyToClick,
               playbackMode == .yangshipin,
               let domIndex = pendingYangshipinDomIndex,
-              yangshipinWebView.url?.host?.contains("yangshipin.cn") == true else { return }
+              yangshipinWebView.url?.host?.contains("yangshipin.cn") == true,
+              !yangshipinWebView.isLoading else { return }
         pendingYangshipinDomIndex = nil
         diagnostics.log("session", "click yangshipin after unsuspend dom=\(domIndex)")
         clickYangshipinChannel(domIndex: domIndex)
@@ -854,8 +887,10 @@ extension WebViewModel: WKNavigationDelegate {
         }
         injectScripts(for: .yangshipin, into: webView)
         if playbackMode != .yangshipin {
+            yangshipinDidInitInBackground = true
             suspend(yangshipinWebView)
         } else {
+            yangshipinDidInitInBackground = false
             flushPendingYangshipinClick()
         }
     }
