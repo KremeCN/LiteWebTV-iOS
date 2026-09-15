@@ -400,7 +400,8 @@ final class WebViewModel: NSObject, ObservableObject {
     }
 
     private func suspendAllExcept(_ active: WKWebView, completion: @escaping () -> Void) {
-        let others = [yangshipinWebView, cctvWebView, probeWebView].filter { $0 !== active }
+        // 三只 WebView 都是 `WKWebView!`；写成数组字面量会被推成 `[WKWebView?]`，这里显式收窄。
+        let others = [yangshipinWebView, cctvWebView, probeWebView].compactMap { $0 }.filter { $0 !== active }
         guard !others.isEmpty else {
             completion()
             return
@@ -711,7 +712,7 @@ final class WebViewModel: NSObject, ObservableObject {
     }
 
     func togglePlayPause() {
-        let target = isCompareMode ? probeWebView : (playbackMode == .cctv ? cctvWebView : yangshipinWebView)
+        let target: WKWebView = isCompareMode ? probeWebView : (playbackMode == .cctv ? cctvWebView : yangshipinWebView)
         let operationID = UUID().uuidString
         let targetID = ObjectIdentifier(target)
         let operation = PendingPlaybackOperation(
