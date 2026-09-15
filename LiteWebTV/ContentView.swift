@@ -87,10 +87,6 @@ struct ContentView: View {
                 // Layer 1: WebView
                 WebViewContainer(webView: viewModel.webView)
 
-                HiddenSystemVolumeView()
-                    .frame(width: 1, height: 1)
-                    .allowsHitTesting(false)
-
                 // Layer 2: Gesture detection overlay
                 gestureLayer(in: geo)
 
@@ -344,6 +340,9 @@ struct ContentView: View {
         let wasAdjusting = (dragMode == .brightness || dragMode == .volume)
 
         if wasAdjusting {
+            if dragMode == .volume {
+                SystemVolume.shared.endGesture()
+            }
             // 松手后 1.5 秒自动隐藏
             hideIndicatorTask?.cancel()
             hideIndicatorTask = Task {

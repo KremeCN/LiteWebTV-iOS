@@ -27,9 +27,9 @@ final class WebViewModel: NSObject, ObservableObject {
 
     private let yangshipinURL = "https://www.yangshipin.cn/tv/home"
     private let pcUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    /// 央视网 `isIosDrmPlayer` 要求 UA 含 Safari、不含 Chrome，且 `appVersion` 能解析出 iOS ≥ 12。
-    /// iOS 26 的 WKWebView 默认 UA 常没有 `Safari/`，会掉进「请使用电脑端」。
-    /// 使用 iOS 26 Safari 形态（OS 冻结为 18_6，Version/26.0）；`/m/` 由原生拦截。
+    /// 央视网走 iPhone Safari UA：`isIPad()`（含 iphone）进 HTML5，`Safari/` 进 FairPlay。
+    /// WKWebView 默认串常没有 `Safari/`，所以 JS 里再锁一次 `userAgent` / `appVersion`。
+    /// 打开 `/m/` 页（页内直接 `createLivePlayer`）；桌面页没有这句调用。
     private let cctvUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1"
     private let beijingTimeZone = TimeZone(identifier: "Asia/Shanghai")!
 
@@ -44,6 +44,7 @@ final class WebViewModel: NSObject, ObservableObject {
     private var cctvURLIndex = 0
     private var yangshipinBootstrapInProgress = false
     private var yangshipinBootstrapTimeoutTask: DispatchWorkItem?
+    private var hasAppliedLaunchChannel = false
 
     private let yangshipinBootstrapTimeout: TimeInterval = 15.0
 
@@ -140,7 +141,7 @@ final class WebViewModel: NSObject, ObservableObject {
         installContentRules()
     }
 
-    /// 把 JS 里的 UA / appVersion 锁成 Safari iPhone，避免 iOS 26 WKWebView 默认串没有 Safari。
+    /// 央视网文档开始：锁 Safari iPhone UA，并包住 `createLivePlayer` 关掉跳客户端。
     private var cctvSafariUAScript: String {
         let ua = cctvUserAgent
         return """
@@ -150,17 +151,35 @@ final class WebViewModel: NSObject, ObservableObject {
             if (host && host.indexOf('cctv') === -1 && host.indexOf('cntv') === -1) return;
             var ua = '\(ua)';
             var app = ua.indexOf('Mozilla/') === 0 ? ua.slice(8) : ua;
-            function lock(obj, key, value) {
+            function lockNav(key, value) {
                 try {
-                    Object.defineProperty(obj, key, {
+                    Object.defineProperty(navigator, key, {
                         configurable: true,
                         enumerable: true,
                         get: function () { return value; }
                     });
                 } catch (e) {}
             }
-            lock(navigator, 'userAgent', ua);
-            lock(navigator, 'appVersion', app);
+            lockNav('userAgent', ua);
+            lockNav('appVersion', app);
+
+            var realCreate = null;
+            function wrappedCreate(paras) {
+                if (paras && typeof paras === 'object') {
+                    paras.jumpToApp = 'false';
+                }
+                if (typeof realCreate === 'function') {
+                    return realCreate.apply(this, arguments);
+                }
+            }
+            try {
+                Object.defineProperty(window, 'createLivePlayer', {
+                    configurable: true,
+                    enumerable: true,
+                    get: function () { return wrappedCreate; },
+                    set: function (fn) { realCreate = fn; }
+                });
+            } catch (e) {}
         })();
         """
     }
@@ -238,6 +257,7 @@ final class WebViewModel: NSObject, ObservableObject {
         playbackError = nil
 
         let channel = logicalChannels[index]
+        SourcePreferenceStore.lastChannelId = channel.id
         switch channel.selectedSource {
         case .cctv:
             guard let slug = channel.cctvSlug else { return }
@@ -310,6 +330,24 @@ final class WebViewModel: NSObject, ObservableObject {
 
         logicalChannels = ChannelMerger.merge(yangshipinItems: yangshipinItems)
         completeYangshipinBootstrap()
+
+        if !hasAppliedLaunchChannel {
+            hasAppliedLaunchChannel = true
+            if let savedId = SourcePreferenceStore.lastChannelId,
+               let listIndex = logicalChannels.firstIndex(where: { $0.id == savedId }) {
+                currentChannelIndex = listIndex
+            } else if let activeDomIndex = yangshipinItems.firstIndex(where: { $0.isActive }) {
+                let domIndex = yangshipinItems[activeDomIndex].index
+                if let listIndex = logicalChannels.firstIndex(where: { $0.yangshipinDomIndex == domIndex }) {
+                    currentChannelIndex = listIndex
+                }
+            } else if currentChannelIndex >= logicalChannels.count {
+                currentChannelIndex = 0
+            }
+            updateActiveChannelHighlight()
+            applyLogicalChannel(at: currentChannelIndex)
+            return
+        }
 
         if preserveCctvSelection, let preservedId,
            let listIndex = logicalChannels.firstIndex(where: { $0.id == preservedId }) {
@@ -646,9 +684,15 @@ extension WebViewModel: WKNavigationDelegate {
             return
         }
 
-        if playbackMode == .cctv, isMobileCctvPath(url.path), isCurrentCctvURLDesktop() {
-            decisionHandler(.cancel)
-            return
+        if playbackMode == .cctv {
+            if isCurrentCctvURLMobile(), isDesktopCctvLiveURL(url) {
+                decisionHandler(.cancel)
+                return
+            }
+            if isCurrentCctvURLDesktop(), isMobileCctvPath(url.path) {
+                decisionHandler(.cancel)
+                return
+            }
         }
 
         decisionHandler(.allow)
@@ -705,10 +749,6 @@ extension WebViewModel: WKScriptMessageHandler {
 
             case "cctvRestricted":
                 guard self.playbackMode == .cctv else { return }
-                while self.cctvURLIndex + 1 < self.cctvURLOptions.count,
-                      self.isMobileCctvPath(self.cctvURLOptions[self.cctvURLIndex + 1].path) {
-                    self.cctvURLIndex += 1
-                }
                 self.retryNextCctvURL()
 
             case "console":
@@ -770,6 +810,18 @@ extension WebViewModel: WKScriptMessageHandler {
     private func isCurrentCctvURLDesktop() -> Bool {
         guard cctvURLIndex < cctvURLOptions.count else { return false }
         return !isMobileCctvPath(cctvURLOptions[cctvURLIndex].path)
+    }
+
+    private func isCurrentCctvURLMobile() -> Bool {
+        guard cctvURLIndex < cctvURLOptions.count else { return false }
+        return isMobileCctvPath(cctvURLOptions[cctvURLIndex].path)
+    }
+
+    private func isDesktopCctvLiveURL(_ url: URL) -> Bool {
+        let host = url.host?.lowercased() ?? ""
+        guard host.contains("cctv.com") || host.contains("cctv.cn") else { return false }
+        let path = url.path.lowercased()
+        return path.contains("/live/") && !isMobileCctvPath(path)
     }
 
     private func parseTimeToMinutes(_ text: String) -> Int? {

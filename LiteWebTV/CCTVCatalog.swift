@@ -37,14 +37,14 @@ enum CCTVCatalog {
         channels.first { $0.slug == slug }
     }
 
-    /// 桌面直播页优先。手机页在 iOS 上会因 hls.js/wasm 判定失败弹出
-    /// 「本时段节目请使用电脑端或央视影音客户端观看」。
+    /// 手机直播页优先。iPhone Safari UA 下桌面页会跳 `/m/`，且桌面 HTML 里没有
+    /// `createLivePlayer(...)`；拦 `/m/` 会得到一块空播放器。
     static func pageURLs(for slug: String) -> [URL] {
-        var urls = [desktopURL(slug)]
+        var urls = [mobileURL(slug)]
+        urls.append(desktopURL(slug))
         if slug == "cctveurope" || slug == "cctvamerica" {
             urls.append(URL(string: "https://tv.cctv.com/live/\(slug)/index.shtml")!)
         }
-        urls.append(mobileURL(slug))
         return urls
     }
 
