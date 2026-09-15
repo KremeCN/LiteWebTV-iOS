@@ -1,9 +1,6 @@
 (function () {
     'use strict';
 
-    try { window.showNoDrmMsg = function () { return false; }; } catch (e) {}
-    try { window.isIosDrmPlayer = function () { return false; }; } catch (e) {}
-
     // 画质优先级：选菜单里实际存在的最高档（网页直播常见最高为「超清」）
     var QUALITY_TIERS = [
         { keys: ['4K'], rank: 100 },
