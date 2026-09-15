@@ -30,7 +30,8 @@ final class WebViewModel: NSObject, ObservableObject {
     /// 央视网 liveplayer：`isIPad()` 为真才会走 HTML5（iPhone/iPad UA）；
     /// 同时不能带 `Mobile`，否则页面脚本会跳到 `/m/`。
     /// Macintosh Safari 会被判定成不支持的桌面浏览器。
-    private let cctvUserAgent = "Mozilla/5.0 (iPad; CPU OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/604.1"
+    /// 带 `Chrome/` 是为了让 `isIosDrmPlayer` 的 Safari-only 判断失败，避免请求 FairPlay。
+    private let cctvUserAgent = "Mozilla/5.0 (iPad; CPU OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/604.1"
     private let beijingTimeZone = TimeZone(identifier: "Asia/Shanghai")!
 
     private let switchDelay: TimeInterval = 3.0
@@ -140,9 +141,9 @@ final class WebViewModel: NSObject, ObservableObject {
         installContentRules()
     }
 
-    /// 在 liveplayer.js 执行前锁住 `showNoDrmMsg`。
-    /// iPad UA 会走 HTML5，但无 hls.js 时该函数会弹出「请使用电脑端或客户端」。
-    /// `atDocumentStart` 时空 hostname 也要锁，避免脚本尚未就绪时漏过。
+    /// 在 liveplayer.js 执行前锁住播放器闸门。
+    /// iPad Safari UA 会让 `isIosDrmPlayer` 为真并请求 `pdrm=1` FairPlay，模拟器播不了。
+    /// 关掉 DRM 后走系统 HLS；同时锁住 `showNoDrmMsg`，避免再弹「请使用电脑端」。
     private var cctvPlayerCompatScript: String {
         """
         (function() {
@@ -151,16 +152,20 @@ final class WebViewModel: NSObject, ObservableObject {
                 return;
             }
             function deny() { return false; }
-            try {
-                Object.defineProperty(window, 'showNoDrmMsg', {
-                    configurable: false,
-                    enumerable: false,
-                    writable: false,
-                    value: deny
-                });
-            } catch (e) {
-                try { window.showNoDrmMsg = deny; } catch (e2) {}
+            function lock(name, impl) {
+                try {
+                    Object.defineProperty(window, name, {
+                        configurable: false,
+                        enumerable: false,
+                        writable: false,
+                        value: impl
+                    });
+                } catch (e) {
+                    try { window[name] = impl; } catch (e2) {}
+                }
             }
+            lock('showNoDrmMsg', deny);
+            lock('isIosDrmPlayer', deny);
         })();
         """
     }
