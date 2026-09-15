@@ -11,22 +11,10 @@
         { keys: ['流畅', '360'], rank: 50 }
     ];
 
-    var PLAYER_STYLE = 'position:fixed!important;top:0!important;left:0!important;width:100vw!important;height:100vh!important;z-index:99999!important;background:#000!important;margin:0!important;padding:0!important;overflow:hidden!important;';
-    var VIDEO_BOX_STYLE = 'position:fixed!important;top:0!important;left:0!important;width:100vw!important;height:100vh!important;z-index:99998!important;background:#000!important;margin:0!important;padding:0!important;';
-    var VIDEO_STYLE = 'width:100%!important;height:100%!important;object-fit:contain!important;';
-    var LAYOUT_MARK = 'data-lwtv-layout';
-
     function postConsole(level, msg) {
         if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridge) {
             window.webkit.messageHandlers.bridge.postMessage({ type: 'console', level: level, data: msg });
         }
-    }
-
-    function applyStyleOnce(el, style) {
-        if (!el || el.getAttribute(LAYOUT_MARK) === '1') return false;
-        el.style.cssText = style;
-        el.setAttribute(LAYOUT_MARK, '1');
-        return true;
     }
 
     function disableAllInputs() {
@@ -37,22 +25,16 @@
         });
     }
 
-    function hidePageChrome() {
+    // 只挡广告和跳 App，保留手机页本身。以前把 header/节目单藏掉再 100vh 铺播放器，看起来像电脑横屏站。
+    function hideBlockingOverlays() {
         var selectors = [
-            '.headernew',
             '#guanggao',
             '.ggcontainer',
-            '.ind_livepageProgram_xq18570',
-            '.title19600',
             '#hasAppNew',
             '.tj_iframe',
             '#framecomentnew',
             '#yspiframe',
-            '.logoBiao',
-            '.column_wrapper',
-            '.zhibo19629_galaxy01',
-            '.footer',
-            '.swiper-container'
+            '.logoBiao'
         ];
         selectors.forEach(function (sel) {
             document.querySelectorAll(sel).forEach(function (el) {
@@ -61,38 +43,18 @@
                 el.setAttribute('data-lwtv-hidden', '1');
             });
         });
-        if (document.body.getAttribute('data-lwtv-page') !== '1') {
-            document.body.style.backgroundColor = 'black';
-            document.body.style.overflow = 'hidden';
-            document.documentElement.style.backgroundColor = 'black';
-            document.body.setAttribute('data-lwtv-page', '1');
-        }
     }
 
-    function applyFullscreenPlayer() {
+    // Safari iPhone 直播走系统播放器：去掉 playsinline，不要把画面钉在 WKWebView 里。
+    function prepareNativeVideo() {
         var video = document.querySelector('video');
         if (!video) return false;
-
-        var changed = false;
-        var ids = ['player', 'html5Player', 'html5Player_live', 'html5VideoBack', 'html5ControlDiv'];
-        ids.forEach(function (id) {
-            if (applyStyleOnce(document.getElementById(id), PLAYER_STYLE)) {
-                changed = true;
-            }
-        });
-
-        var videoBox = document.querySelector('.video_box');
-        if (applyStyleOnce(videoBox, VIDEO_BOX_STYLE)) {
-            changed = true;
-        }
-
-        if (applyStyleOnce(video, VIDEO_STYLE)) {
-            changed = true;
-        }
-        video.setAttribute('playsinline', 'true');
-        video.setAttribute('webkit-playsinline', 'true');
-        try { video.disableRemotePlayback = true; } catch (e) {}
-        return changed;
+        video.removeAttribute('playsinline');
+        video.removeAttribute('webkit-playsinline');
+        video.removeAttribute('x5-playsinline');
+        video.removeAttribute('x5-video-player-type');
+        try { video.disableRemotePlayback = false; } catch (e) {}
+        return true;
     }
 
     function tryPlayVideo() {
@@ -221,7 +183,6 @@
     }
 
     function _startObserver() {
-        // 不监听 style，避免 applyFullscreenPlayer 写样式后自激触发
         _observer = new MutationObserver(_scheduleRun);
         _observer.observe(document.documentElement, {
             childList: true,
@@ -233,13 +194,13 @@
 
     addTask('pagePrep', function () {
         disableAllInputs();
-        hidePageChrome();
-        applyFullscreenPlayer();
+        hideBlockingOverlays();
+        prepareNativeVideo();
         return true;
     });
 
     addTask('autoPlay', function () {
-        applyFullscreenPlayer();
+        prepareNativeVideo();
         if (tryPlayVideo()) return true;
         return clickPlayButton();
     });
@@ -254,13 +215,12 @@
     });
 
     addTask('quality', function () {
-        applyFullscreenPlayer();
+        prepareNativeVideo();
         return selectHighestQuality();
     });
 
-    addTask('fullscreen', function () {
-        applyFullscreenPlayer();
-        return !!document.querySelector('video');
+    addTask('nativePlayer', function () {
+        return prepareNativeVideo();
     });
 
     addTask('videoDebug', function () {
@@ -307,10 +267,9 @@
         return true;
     });
 
-    // DOM 变更时按需补布局；幂等写入，不监听 style 属性
     addTask('layoutRefresh', function () {
-        hidePageChrome();
-        applyFullscreenPlayer();
+        hideBlockingOverlays();
+        prepareNativeVideo();
         return false;
     });
 

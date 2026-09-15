@@ -3,20 +3,63 @@ import WebKit
 
 // MARK: - WKWebView UIViewRepresentable Wrapper
 
-struct WebViewContainer: UIViewRepresentable {
-    let webView: WKWebView
+struct DualWebViewContainer: UIViewRepresentable {
+    let yangshipinWebView: WKWebView
+    let cctvWebView: WKWebView
+    var showsCctv: Bool
 
-    func makeUIView(context: Context) -> WKWebView {
+    func makeUIView(context: Context) -> DualWebViewHost {
+        let host = DualWebViewHost()
+        host.embed(yangshipinWebView)
+        host.embed(cctvWebView)
+        host.setShowsCctv(showsCctv)
+        return host
+    }
+
+    func updateUIView(_ host: DualWebViewHost, context: Context) {
+        host.setShowsCctv(showsCctv)
+    }
+}
+
+final class DualWebViewHost: UIView {
+    private weak var yangshipin: WKWebView?
+    private weak var cctv: WKWebView?
+
+    func embed(_ webView: WKWebView) {
+        webView.removeFromSuperview()
         webView.backgroundColor = .black
-        // 关键：禁止 WKWebView 自动调整内容边距以适应安全区域
-        // 这是视频偏移到右侧的根本原因
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.insetsLayoutMarginsFromSafeArea = false
         webView.scrollView.insetsLayoutMarginsFromSafeArea = false
-        return webView
+        webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        webView.frame = bounds
+        addSubview(webView)
+        if yangshipin == nil {
+            yangshipin = webView
+        } else {
+            cctv = webView
+        }
     }
 
-    func updateUIView(_ uiView: WKWebView, context: Context) {}
+    func setShowsCctv(_ showsCctv: Bool) {
+        yangshipin?.frame = bounds
+        cctv?.frame = bounds
+        yangshipin?.isHidden = showsCctv
+        cctv?.isHidden = !showsCctv
+        yangshipin?.isUserInteractionEnabled = !showsCctv
+        cctv?.isUserInteractionEnabled = showsCctv
+        if showsCctv, let cctv {
+            bringSubviewToFront(cctv)
+        } else if let yangshipin {
+            bringSubviewToFront(yangshipin)
+        }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        yangshipin?.frame = bounds
+        cctv?.frame = bounds
+    }
 }
 
 // MARK: - Main Content View
@@ -85,10 +128,18 @@ struct ContentView: View {
         GeometryReader { geo in
             ZStack {
                 // Layer 1: WebView
-                WebViewContainer(webView: viewModel.webView)
+                DualWebViewContainer(
+                    yangshipinWebView: viewModel.yangshipinWebView,
+                    cctvWebView: viewModel.cctvWebView,
+                    showsCctv: viewModel.playbackMode == .cctv
+                )
 
                 // Layer 2: Gesture detection overlay
                 gestureLayer(in: geo)
+
+                if viewModel.playbackMode == .cctv && !showChannelSidebar && !showProgramSidebar {
+                    cctvEdgeHandles(in: geo)
+                }
 
                 // Layer 3: Channel sidebar (left)
                 if showChannelSidebar {
@@ -263,7 +314,33 @@ struct ContentView: View {
                     }
             )
             .zIndex(15)
-            .allowsHitTesting(!isMenuVisible || !isTouchInSidebar)
+            .allowsHitTesting(viewModel.playbackMode == .yangshipin || isMenuVisible)
+    }
+
+    /// 央视网要把点击交给页面/系统播放器，只留左右边缘划出手势。
+    private func cctvEdgeHandles(in geo: GeometryProxy) -> some View {
+        HStack(spacing: 0) {
+            Color.clear
+                .contentShape(Rectangle())
+                .frame(width: 36)
+                .gesture(cctvEdgeDrag(in: geo))
+            Spacer(minLength: 0)
+            Color.clear
+                .contentShape(Rectangle())
+                .frame(width: 36)
+                .gesture(cctvEdgeDrag(in: geo))
+        }
+        .zIndex(16)
+    }
+
+    private func cctvEdgeDrag(in geo: GeometryProxy) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                handleDragChanged(value: value, in: geo)
+            }
+            .onEnded { value in
+                handleDragEnded(value: value, in: geo)
+            }
     }
 
     private var isMenuVisible: Bool {

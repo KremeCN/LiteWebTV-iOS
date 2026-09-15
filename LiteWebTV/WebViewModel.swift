@@ -30,6 +30,7 @@ final class WebViewModel: NSObject, ObservableObject {
     /// 央视网走 iPhone Safari UA：`isIPad()`（含 iphone）进 HTML5，`Safari/` 进 FairPlay。
     /// WKWebView 默认串常没有 `Safari/`，所以 JS 里再锁一次 `userAgent` / `appVersion`。
     /// 打开 `/m/` 页（页内直接 `createLivePlayer`）；桌面页没有这句调用。
+    /// 请求头 UA 不够：iPad 默认 `preferredContentMode = .desktop`，会出电脑横屏站。
     private let cctvUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1"
     private let beijingTimeZone = TimeZone(identifier: "Asia/Shanghai")!
 
@@ -50,7 +51,15 @@ final class WebViewModel: NSObject, ObservableObject {
 
     // MARK: - WebView
 
-    private(set) var webView: WKWebView!
+    /// 央视频：PC 页 + 页内 MSE，必须 `allowsInlineMediaPlayback = true`。
+    private(set) var yangshipinWebView: WKWebView!
+    /// 央视网：手机页 + 系统播放器。配置在创建时冻结，必须单独一只 WebView。
+    /// Safari iPhone 默认不允许页内播放，直播会进 AVPlayer；我们以前把视频钉在 WKWebView 里，FairPlay 过不去。
+    private(set) var cctvWebView: WKWebView!
+
+    var webView: WKWebView {
+        playbackMode == .cctv ? cctvWebView : yangshipinWebView
+    }
 
     // MARK: - Script Content Cache
 
@@ -70,7 +79,8 @@ final class WebViewModel: NSObject, ObservableObject {
 
     deinit {
         scheduleTicker?.cancel()
-        webView?.configuration.userContentController.removeScriptMessageHandler(forName: "bridge")
+        yangshipinWebView?.configuration.userContentController.removeScriptMessageHandler(forName: "bridge")
+        cctvWebView?.configuration.userContentController.removeScriptMessageHandler(forName: "bridge")
     }
 
     // MARK: - Public Helpers
@@ -114,31 +124,40 @@ final class WebViewModel: NSObject, ObservableObject {
     // MARK: - WebView Configuration
 
     private func configureWebView() {
-        let config = WKWebViewConfiguration()
+        yangshipinWebView = makeWebView(kind: .yangshipin)
+        cctvWebView = makeWebView(kind: .cctv)
+        yangshipinWebView.customUserAgent = pcUserAgent
+        cctvWebView.customUserAgent = cctvUserAgent
+        installContentRules()
+    }
 
+    private func makeWebView(kind: PlaybackMode) -> WKWebView {
+        let config = WKWebViewConfiguration()
         let contentController = WKUserContentController()
         contentController.add(self, name: "bridge")
-        contentController.addUserScript(
-            WKUserScript(
-                source: cctvSafariUAScript,
-                injectionTime: .atDocumentStart,
-                forMainFrameOnly: false
+        if kind == .cctv {
+            contentController.addUserScript(
+                WKUserScript(
+                    source: cctvSafariUAScript,
+                    injectionTime: .atDocumentStart,
+                    forMainFrameOnly: false
+                )
             )
-        )
+        }
         config.userContentController = contentController
-
         config.mediaTypesRequiringUserActionForPlayback = []
-        config.allowsInlineMediaPlayback = true
+        // 央视频要页内 MSE；央视网关掉页内播放，让系统播放器接手（和 Safari iPhone 一样）。
+        config.allowsInlineMediaPlayback = (kind == .yangshipin)
+        config.defaultWebpagePreferences.preferredContentMode = (kind == .cctv) ? .mobile : .desktop
 
-        webView = WKWebView(frame: .zero, configuration: config)
+        let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
         webView.allowsBackForwardNavigationGestures = false
-        webView.scrollView.isScrollEnabled = false
+        webView.scrollView.isScrollEnabled = (kind == .cctv)
         webView.isOpaque = true
         webView.backgroundColor = .black
         webView.scrollView.backgroundColor = .black
-
-        installContentRules()
+        return webView
     }
 
     /// 央视网文档开始：锁 Safari iPhone UA，并包住 `createLivePlayer` 关掉跳客户端。
@@ -162,6 +181,36 @@ final class WebViewModel: NSObject, ObservableObject {
             }
             lockNav('userAgent', ua);
             lockNav('appVersion', app);
+            lockNav('vendor', 'Apple Computer, Inc.');
+            try {
+                if (typeof window.safari === 'undefined') {
+                    window.safari = {
+                        pushNotification: {
+                            toString: function () { return '[object SafariRemoteNotification]'; }
+                        }
+                    };
+                }
+            } catch (e) {}
+
+            try {
+                Object.defineProperty(HTMLVideoElement.prototype, 'playsInline', {
+                    configurable: true,
+                    enumerable: true,
+                    get: function () { return false; },
+                    set: function () {}
+                });
+            } catch (e) {}
+
+            try {
+                var origSet = Element.prototype.setAttribute;
+                Element.prototype.setAttribute = function (name, value) {
+                    var n = String(name || '').toLowerCase();
+                    if (n === 'playsinline' || n === 'webkit-playsinline' || n === 'x5-playsinline') {
+                        return;
+                    }
+                    return origSet.apply(this, arguments);
+                };
+            } catch (e) {}
 
             var realCreate = null;
             function wrappedCreate(paras) {
@@ -187,7 +236,7 @@ final class WebViewModel: NSObject, ObservableObject {
     // MARK: - Playback Routing
 
     private func startPlaybackRouting() {
-        SourceCapability.probeMediaSourceSupport(in: webView) { [weak self] supported in
+        SourceCapability.probeMediaSourceSupport(in: yangshipinWebView) { [weak self] supported in
             guard let self = self else { return }
             self.yangshipinPlayable = supported
             if supported {
@@ -200,7 +249,6 @@ final class WebViewModel: NSObject, ObservableObject {
 
     private func enterYangshipinCapabilityMode() {
         playbackMode = .yangshipin
-        webView.customUserAgent = pcUserAgent
         beginYangshipinBootstrap()
         loadYangshipinHome()
     }
@@ -210,8 +258,8 @@ final class WebViewModel: NSObject, ObservableObject {
         if markYangshipinUnavailable {
             yangshipinPlayable = false
         }
+        pauseMedia(in: yangshipinWebView)
         playbackMode = .cctv
-        webView.customUserAgent = cctvUserAgent
         currentChannelIndex = min(max(startIndex, 0), CCTVCatalog.channels.count - 1)
         logicalChannels = ChannelMerger.cctvOnlyChannels(activeIndex: currentChannelIndex)
         applyLogicalChannel(at: currentChannelIndex)
@@ -245,7 +293,14 @@ final class WebViewModel: NSObject, ObservableObject {
 
     private func loadYangshipinHome() {
         guard let url = URL(string: yangshipinURL) else { return }
-        webView.load(URLRequest(url: url))
+        yangshipinWebView.load(URLRequest(url: url))
+    }
+
+    private func pauseMedia(in target: WKWebView) {
+        target.evaluateJavaScript(
+            "document.querySelectorAll('video,audio').forEach(function(m){ try { m.pause(); } catch(e) {} });",
+            completionHandler: nil
+        )
     }
 
     private func applyLogicalChannel(at index: Int) {
@@ -261,14 +316,14 @@ final class WebViewModel: NSObject, ObservableObject {
         switch channel.selectedSource {
         case .cctv:
             guard let slug = channel.cctvSlug else { return }
+            pauseMedia(in: yangshipinWebView)
             playbackMode = .cctv
-            webView.customUserAgent = cctvUserAgent
             pendingYangshipinDomIndex = nil
             loadCctvPage(for: slug)
         case .yangshipin:
             guard let domIndex = channel.yangshipinDomIndex else { return }
+            pauseMedia(in: cctvWebView)
             playbackMode = .yangshipin
-            webView.customUserAgent = pcUserAgent
             activeCctvSlug = nil
             programs = []
             currentProgramIndex = 0
@@ -278,11 +333,11 @@ final class WebViewModel: NSObject, ObservableObject {
 
     private func loadYangshipinChannel(domIndex: Int) {
         pendingYangshipinDomIndex = domIndex
-        if webView.url?.host?.contains("yangshipin.cn") == true {
+        if yangshipinWebView.url?.host?.contains("yangshipin.cn") == true {
             clickYangshipinChannel(domIndex: domIndex)
             pendingYangshipinDomIndex = nil
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-                self?.webView.evaluateJavaScript("window.extractData()", completionHandler: nil)
+                self?.yangshipinWebView.evaluateJavaScript("window.extractData()", completionHandler: nil)
             }
         } else {
             loadYangshipinHome()
@@ -303,7 +358,9 @@ final class WebViewModel: NSObject, ObservableObject {
             shouldDismissSplash = true
             return
         }
-        webView.load(URLRequest(url: cctvURLOptions[cctvURLIndex]))
+        let url = cctvURLOptions[cctvURLIndex]
+        print("[LiteWebTV] CCTV load \(url.absoluteString)")
+        cctvWebView.load(URLRequest(url: url))
     }
 
     private func retryNextCctvURL() {
@@ -410,7 +467,8 @@ final class WebViewModel: NSObject, ObservableObject {
         ) { [weak self] ruleList, _ in
             if let ruleList = ruleList {
                 DispatchQueue.main.async {
-                    self?.webView.configuration.userContentController.add(ruleList)
+                    self?.yangshipinWebView.configuration.userContentController.add(ruleList)
+                    self?.cctvWebView.configuration.userContentController.add(ruleList)
                 }
             }
         }
@@ -496,7 +554,7 @@ final class WebViewModel: NSObject, ObservableObject {
 
     // MARK: - Script Injection
 
-    private func injectScripts(for mode: PlaybackMode) {
+    private func injectScripts(for mode: PlaybackMode, into target: WKWebView? = nil) {
         let consoleBridge = """
         (function() {
             var oldLog = console.log;
@@ -532,7 +590,7 @@ final class WebViewModel: NSObject, ObservableObject {
             combinedScript = consoleBridge + "\n" + platformSpoof + "\n" + bridgeShimScript + "\n" + automation
         }
 
-        webView.evaluateJavaScript(combinedScript) { _, error in
+        (target ?? webView).evaluateJavaScript(combinedScript) { _, error in
             if let error = error {
                 print("[LiteWebTV] Script injection error: \(error.localizedDescription)")
             }
@@ -575,7 +633,7 @@ final class WebViewModel: NSObject, ObservableObject {
             }
         })();
         """
-        webView.evaluateJavaScript(js, completionHandler: nil)
+        yangshipinWebView.evaluateJavaScript(js, completionHandler: nil)
     }
 
     func togglePlayPause() {
@@ -613,20 +671,20 @@ final class WebViewModel: NSObject, ObservableObject {
 
 extension WebViewModel: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        let host = webView.url?.host?.lowercased() ?? ""
-        if host.contains("cctv.com") || host.contains("cctv.cn") {
-            injectScripts(for: .cctv)
+        if webView === cctvWebView {
+            injectScripts(for: .cctv, into: webView)
             if let slug = activeCctvSlug {
                 fetchEpg(for: slug)
             }
-        } else if host.contains("yangshipin.cn") {
-            injectScripts(for: .yangshipin)
-            if let domIndex = pendingYangshipinDomIndex {
-                clickYangshipinChannel(domIndex: domIndex)
-                pendingYangshipinDomIndex = nil
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-                    self?.webView.evaluateJavaScript("window.extractData()", completionHandler: nil)
-                }
+            return
+        }
+
+        injectScripts(for: .yangshipin, into: webView)
+        if let domIndex = pendingYangshipinDomIndex {
+            clickYangshipinChannel(domIndex: domIndex)
+            pendingYangshipinDomIndex = nil
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.yangshipinWebView.evaluateJavaScript("window.extractData()", completionHandler: nil)
             }
         }
     }
@@ -665,10 +723,13 @@ extension WebViewModel: WKNavigationDelegate {
     func webView(
         _ webView: WKWebView,
         decidePolicyFor navigationAction: WKNavigationAction,
-        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+        preferences: WKWebpagePreferences,
+        decisionHandler: @escaping (WKNavigationActionPolicy, WKWebpagePreferences) -> Void
     ) {
+        preferences.preferredContentMode = (webView === cctvWebView) ? .mobile : .desktop
+
         guard let url = navigationAction.request.url else {
-            decisionHandler(.allow)
+            decisionHandler(.allow, preferences)
             return
         }
 
@@ -680,22 +741,16 @@ extension WebViewModel: WKNavigationDelegate {
             || scheme == "itms"
             || absolute.contains("apps.apple.com")
             || absolute.contains("itunes.apple.com") {
-            decisionHandler(.cancel)
+            decisionHandler(.cancel, preferences)
             return
         }
 
-        if playbackMode == .cctv {
-            if isCurrentCctvURLMobile(), isDesktopCctvLiveURL(url) {
-                decisionHandler(.cancel)
-                return
-            }
-            if isCurrentCctvURLDesktop(), isMobileCctvPath(url.path) {
-                decisionHandler(.cancel)
-                return
-            }
+        if webView === cctvWebView, isDesktopCctvLiveURL(url) {
+            decisionHandler(.cancel, preferences)
+            return
         }
 
-        decisionHandler(.allow)
+        decisionHandler(.allow, preferences)
     }
 }
 
@@ -805,16 +860,6 @@ extension WebViewModel: WKScriptMessageHandler {
 
     private func isMobileCctvPath(_ path: String) -> Bool {
         path.lowercased().contains("/m/") || path.lowercased().hasSuffix("/m")
-    }
-
-    private func isCurrentCctvURLDesktop() -> Bool {
-        guard cctvURLIndex < cctvURLOptions.count else { return false }
-        return !isMobileCctvPath(cctvURLOptions[cctvURLIndex].path)
-    }
-
-    private func isCurrentCctvURLMobile() -> Bool {
-        guard cctvURLIndex < cctvURLOptions.count else { return false }
-        return isMobileCctvPath(cctvURLOptions[cctvURLIndex].path)
     }
 
     private func isDesktopCctvLiveURL(_ url: URL) -> Bool {

@@ -37,15 +37,10 @@ enum CCTVCatalog {
         channels.first { $0.slug == slug }
     }
 
-    /// 手机直播页优先。iPhone Safari UA 下桌面页会跳 `/m/`，且桌面 HTML 里没有
-    /// `createLivePlayer(...)`；拦 `/m/` 会得到一块空播放器。
+    /// 手机直播页。iPhone Safari UA 下桌面页会跳 `/m/`，且桌面 HTML 里没有
+    /// `createLivePlayer(...)`；再回落到桌面站只会变成电脑横屏布局。
     static func pageURLs(for slug: String) -> [URL] {
-        var urls = [mobileURL(slug)]
-        urls.append(desktopURL(slug))
-        if slug == "cctveurope" || slug == "cctvamerica" {
-            urls.append(URL(string: "https://tv.cctv.com/live/\(slug)/index.shtml")!)
-        }
-        return urls
+        [mobileURL(slug)]
     }
 
     static func epgURL(for slug: String, date: Date = Date()) -> URL? {
@@ -105,10 +100,6 @@ enum CCTVCatalog {
         default:
             return "cctv\(number)"
         }
-    }
-
-    private static func desktopURL(_ slug: String) -> URL {
-        URL(string: "https://tv.cctv.com/live/\(slug)/")!
     }
 
     private static func mobileURL(_ slug: String) -> URL {
