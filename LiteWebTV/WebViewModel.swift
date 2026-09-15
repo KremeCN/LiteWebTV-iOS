@@ -27,11 +27,10 @@ final class WebViewModel: NSObject, ObservableObject {
 
     private let yangshipinURL = "https://www.yangshipin.cn/tv/home"
     private let pcUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    /// 央视网 liveplayer：`isIPad()` 为真才会走 HTML5（iPhone/iPad UA）；
-    /// 同时不能带 `Mobile`，否则页面脚本会跳到 `/m/`。
-    /// 使用 Safari、不含 Chrome，让 `isIosDrmPlayer` 为真，走系统 HLS + FairPlay。
-    /// Macintosh Safari 会被判定成不支持的桌面浏览器。
-    private let cctvUserAgent = "Mozilla/5.0 (iPad; CPU OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/604.1"
+    /// 央视网 `isIosDrmPlayer` 要求 UA 含 Safari、不含 Chrome，且 `appVersion` 能解析出 iOS ≥ 12。
+    /// iOS 26 的 WKWebView 默认 UA 常没有 `Safari/`，会掉进「请使用电脑端」。
+    /// 使用 iOS 26 Safari 形态（OS 冻结为 18_6，Version/26.0）；`/m/` 由原生拦截。
+    private let cctvUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1"
     private let beijingTimeZone = TimeZone(identifier: "Asia/Shanghai")!
 
     private let switchDelay: TimeInterval = 3.0
@@ -118,6 +117,13 @@ final class WebViewModel: NSObject, ObservableObject {
 
         let contentController = WKUserContentController()
         contentController.add(self, name: "bridge")
+        contentController.addUserScript(
+            WKUserScript(
+                source: cctvSafariUAScript,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: false
+            )
+        )
         config.userContentController = contentController
 
         config.mediaTypesRequiringUserActionForPlayback = []
@@ -132,6 +138,31 @@ final class WebViewModel: NSObject, ObservableObject {
         webView.scrollView.backgroundColor = .black
 
         installContentRules()
+    }
+
+    /// 把 JS 里的 UA / appVersion 锁成 Safari iPhone，避免 iOS 26 WKWebView 默认串没有 Safari。
+    private var cctvSafariUAScript: String {
+        let ua = cctvUserAgent
+        return """
+        (function() {
+            var host = String(location.hostname || '').toLowerCase();
+            if (host.indexOf('yangshipin') !== -1) return;
+            if (host && host.indexOf('cctv') === -1 && host.indexOf('cntv') === -1) return;
+            var ua = '\(ua)';
+            var app = ua.indexOf('Mozilla/') === 0 ? ua.slice(8) : ua;
+            function lock(obj, key, value) {
+                try {
+                    Object.defineProperty(obj, key, {
+                        configurable: true,
+                        enumerable: true,
+                        get: function () { return value; }
+                    });
+                } catch (e) {}
+            }
+            lock(navigator, 'userAgent', ua);
+            lock(navigator, 'appVersion', app);
+        })();
+        """
     }
 
     // MARK: - Playback Routing
