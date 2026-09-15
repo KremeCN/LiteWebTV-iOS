@@ -395,14 +395,14 @@ final class WebViewModel: NSObject, ObservableObject {
             self?.diagnostics.log("media", "state before suspend \(label) raw=\(state.rawValue)")
         }
         webView.setAllMediaPlaybackSuspended(true) { [weak self] in
-            let finish = {
-                self?.diagnostics.log("media", "suspended \(label) closePresentations=\(closePresentations)")
-                completion()
-            }
             if closePresentations {
-                webView.closeAllMediaPresentations(finish)
+                webView.closeAllMediaPresentations {
+                    self?.diagnostics.log("media", "suspended \(label) closePresentations=true")
+                    completion()
+                }
             } else {
-                finish()
+                self?.diagnostics.log("media", "suspended \(label) closePresentations=false")
+                completion()
             }
         }
     }
