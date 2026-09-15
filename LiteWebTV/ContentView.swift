@@ -3,55 +3,50 @@ import WebKit
 
 // MARK: - WKWebView UIViewRepresentable Wrapper
 
-struct DualWebViewContainer: UIViewRepresentable {
+struct PlayerWebViewContainer: UIViewRepresentable {
     let yangshipinWebView: WKWebView
     let cctvWebView: WKWebView
-    var showsCctv: Bool
+    let probeWebView: WKWebView
+    var surface: VisibleWebSurface
+    var probeRevision: Int
 
-    func makeUIView(context: Context) -> DualWebViewHost {
-        let host = DualWebViewHost()
-        host.embed(yangshipinWebView)
-        host.embed(cctvWebView)
-        host.setShowsCctv(showsCctv)
+    func makeUIView(context: Context) -> PlayerWebViewHost {
+        let host = PlayerWebViewHost()
+        host.apply(
+            yangshipin: yangshipinWebView,
+            cctv: cctvWebView,
+            probe: probeWebView,
+            surface: surface
+        )
         return host
     }
 
-    func updateUIView(_ host: DualWebViewHost, context: Context) {
-        host.setShowsCctv(showsCctv)
+    func updateUIView(_ host: PlayerWebViewHost, context: Context) {
+        host.apply(
+            yangshipin: yangshipinWebView,
+            cctv: cctvWebView,
+            probe: probeWebView,
+            surface: surface
+        )
     }
 }
 
-final class DualWebViewHost: UIView {
+final class PlayerWebViewHost: UIView {
     private weak var yangshipin: WKWebView?
     private weak var cctv: WKWebView?
+    private weak var probe: WKWebView?
 
-    func embed(_ webView: WKWebView) {
-        webView.removeFromSuperview()
-        webView.backgroundColor = .black
-        webView.scrollView.contentInsetAdjustmentBehavior = .never
-        webView.insetsLayoutMarginsFromSafeArea = false
-        webView.scrollView.insetsLayoutMarginsFromSafeArea = false
-        webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        webView.frame = bounds
-        addSubview(webView)
-        if yangshipin == nil {
-            yangshipin = webView
-        } else {
-            cctv = webView
-        }
-    }
-
-    func setShowsCctv(_ showsCctv: Bool) {
-        yangshipin?.frame = bounds
-        cctv?.frame = bounds
-        yangshipin?.isHidden = showsCctv
-        cctv?.isHidden = !showsCctv
-        yangshipin?.isUserInteractionEnabled = !showsCctv
-        cctv?.isUserInteractionEnabled = showsCctv
-        if showsCctv, let cctv {
-            bringSubviewToFront(cctv)
-        } else if let yangshipin {
-            bringSubviewToFront(yangshipin)
+    func apply(yangshipin: WKWebView, cctv: WKWebView, probe: WKWebView, surface: VisibleWebSurface) {
+        attach(&self.yangshipin, yangshipin, interactive: false)
+        attach(&self.cctv, cctv, interactive: false)
+        attach(&self.probe, probe, interactive: surface == .probe)
+        self.yangshipin?.isHidden = surface != .yangshipin
+        self.cctv?.isHidden = surface != .cctv
+        self.probe?.isHidden = surface != .probe
+        switch surface {
+        case .yangshipin: if let view = self.yangshipin { bringSubviewToFront(view) }
+        case .cctv: if let view = self.cctv { bringSubviewToFront(view) }
+        case .probe: if let view = self.probe { bringSubviewToFront(view) }
         }
     }
 
@@ -59,6 +54,26 @@ final class DualWebViewHost: UIView {
         super.layoutSubviews()
         yangshipin?.frame = bounds
         cctv?.frame = bounds
+        probe?.frame = bounds
+    }
+
+    private func attach(_ slot: inout WKWebView?, _ webView: WKWebView, interactive: Bool) {
+        if slot !== webView {
+            slot?.removeFromSuperview()
+            webView.removeFromSuperview()
+            addSubview(webView)
+            slot = webView
+        }
+        webView.backgroundColor = .black
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        webView.insetsLayoutMarginsFromSafeArea = false
+        webView.scrollView.insetsLayoutMarginsFromSafeArea = false
+        webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        webView.frame = bounds
+        webView.isUserInteractionEnabled = interactive
+        webView.scrollView.isScrollEnabled = interactive
+        webView.scrollView.bounces = interactive
+        webView.scrollView.panGestureRecognizer.isEnabled = interactive
     }
 }
 
@@ -116,6 +131,7 @@ struct ContentView: View {
 
     // 退出确认
     @State private var lastBackTime: Date = .distantPast
+    @State private var showDiagnostics = false
 
     // MARK: - Safe Area Helper
     private var realSafeArea: UIEdgeInsets {
@@ -128,14 +144,19 @@ struct ContentView: View {
         GeometryReader { geo in
             ZStack {
                 // Layer 1: WebView
-                DualWebViewContainer(
+                PlayerWebViewContainer(
                     yangshipinWebView: viewModel.yangshipinWebView,
                     cctvWebView: viewModel.cctvWebView,
-                    showsCctv: viewModel.playbackMode == .cctv
+                    probeWebView: viewModel.probeWebView,
+                    surface: viewModel.visibleSurface,
+                    probeRevision: viewModel.probeRevision
                 )
 
-                // Layer 2: Gesture detection overlay
-                gestureLayer(in: geo)
+                if !viewModel.isCompareMode {
+                    gestureLayer(in: geo)
+                }
+
+                alwaysAvailableChrome
 
                 // Layer 3: Channel sidebar (left)
                 if showChannelSidebar {
@@ -232,7 +253,11 @@ struct ContentView: View {
                     .transition(.opacity)
                 }
 
-                // Layer 8: Splash cover (highest z-index)
+                if showDiagnostics {
+                    DiagnosticPanel(viewModel: viewModel, onClose: { showDiagnostics = false })
+                        .zIndex(130)
+                }
+
                 if showSplash {
                     SplashView(statusText: splashStatusText)
                         .offset(y: splashOffset)
@@ -276,6 +301,11 @@ struct ContentView: View {
             guard let error, !error.isEmpty else { return }
             showToastMessage(error)
         }
+        .onReceive(viewModel.$isCompareMode) { compare in
+            if compare {
+                dismissSplashImmediately()
+            }
+        }
     }
 
     // MARK: - Gesture Layer
@@ -283,6 +313,7 @@ struct ContentView: View {
 
     private func gestureLayer(in geo: GeometryProxy) -> some View {
         Color.clear
+            .frame(width: geo.size.width, height: geo.size.height)
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
@@ -310,7 +341,54 @@ struct ContentView: View {
                     }
             )
             .zIndex(15)
-            .allowsHitTesting(!isMenuVisible || !isTouchInSidebar)
+            .allowsHitTesting(!viewModel.isCompareMode && (!isMenuVisible || !isTouchInSidebar))
+    }
+
+    private var alwaysAvailableChrome: some View {
+        VStack {
+            HStack(spacing: 8) {
+                if viewModel.isCompareMode {
+                    chromeButton("退出对照") {
+                        viewModel.exitOfficialCompare()
+                    }
+                }
+                Spacer()
+                chromeButton("频道") {
+                    dismissSplashImmediately()
+                    showChannelSidebar = true
+                    showProgramSidebar = false
+                    showDiagnostics = false
+                }
+                chromeButton("节目") {
+                    dismissSplashImmediately()
+                    showProgramSidebar = true
+                    showChannelSidebar = false
+                    showDiagnostics = false
+                }
+                chromeButton("诊断") {
+                    dismissSplashImmediately()
+                    showDiagnostics = true
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 10)
+            Spacer()
+        }
+        .zIndex(140)
+        .allowsHitTesting(true)
+    }
+
+    private func chromeButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.black.opacity(0.72))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
     }
 
     private var isMenuVisible: Bool {
@@ -496,6 +574,12 @@ struct ContentView: View {
     // MARK: - Splash Screen
     // Maps from Android: MainActivity.kt showSplashScreen, animateCurtainRise
 
+    private func dismissSplashImmediately() {
+        splashFallbackTask?.cancel()
+        showSplash = false
+        splashOffset = 0
+    }
+
     private func showSplashScreen(statusText: String) {
         viewModel.resetSplash()
         splashStatusText = statusText
@@ -578,6 +662,84 @@ enum DragMode {
     case brightness
     case volume
     case gesture
+}
+
+struct DiagnosticPanel: View {
+    @ObservedObject var viewModel: WebViewModel
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("播放诊断")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundColor(.white)
+                Spacer()
+                Button("关闭", action: onClose)
+                    .foregroundColor(.white)
+            }
+
+            Text("build \(PlaybackDiagnostics.buildID) · 不是完整网络抓包")
+                .font(.system(size: 12))
+                .foregroundColor(Color(hex: "BBBBBB"))
+
+            Text(viewModel.diagnostics.lastSummary)
+                .font(.system(size: 13))
+                .foregroundColor(.white)
+                .lineLimit(3)
+
+            Text("下方开关只记录配置；再次点「官方页面对照」后才会应用。")
+                .font(.system(size: 11))
+                .foregroundColor(Color(hex: "BBBBBB"))
+
+            Toggle("对照使用 Safari UA", isOn: $viewModel.probeUseSafariUA)
+                .foregroundColor(.white)
+                .onChange(of: viewModel.probeUseSafariUA) { _ in
+                    viewModel.noteProbeConfigurationChanged()
+                }
+            Toggle("对照允许页内播放", isOn: $viewModel.probeAllowsInlinePlayback)
+                .foregroundColor(.white)
+                .onChange(of: viewModel.probeAllowsInlinePlayback) { _ in
+                    viewModel.noteProbeConfigurationChanged()
+                }
+
+            HStack(spacing: 8) {
+                Button("官方页面对照") {
+                    viewModel.enterOfficialCompare()
+                    onClose()
+                }
+                Button("复制日志") {
+                    viewModel.copyDiagnostics()
+                }
+                Button("导出") {
+                    viewModel.shareDiagnostics()
+                }
+                Button("清空") {
+                    viewModel.diagnostics.clearAll()
+                }
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(Color(hex: "00A1D6"))
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(viewModel.diagnostics.events.suffix(40).reversed())) { event in
+                        Text("#\(event.attempt) [\(event.category)] \(event.message)")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(Color.white.opacity(0.86))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: 520, maxHeight: 360, alignment: .topLeading)
+        .background(Color.black.opacity(0.92))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .padding(.trailing, 16)
+        .padding(.top, 56)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+    }
 }
 
 // MARK: - Splash View
