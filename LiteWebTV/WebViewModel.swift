@@ -79,6 +79,8 @@ final class WebViewModel: NSObject, ObservableObject {
 
     private var bridgeShimScript = ""
     private var automationScript = ""
+    private var yangshipinGateScript = ""
+    private var yangshipinExtractScript = ""
     private var cctvAutomationScript = ""
     private var cctvProbeScript = ""
     private var cctvNativeHlsScript = ""
@@ -198,6 +200,14 @@ final class WebViewModel: NSObject, ObservableObject {
            let content = try? String(contentsOf: url, encoding: .utf8) {
             automationScript = content
         }
+        if let url = Bundle.main.url(forResource: "yangshipin_gate", withExtension: "js"),
+           let content = try? String(contentsOf: url, encoding: .utf8) {
+            yangshipinGateScript = content
+        }
+        if let url = Bundle.main.url(forResource: "yangshipin_extract", withExtension: "js"),
+           let content = try? String(contentsOf: url, encoding: .utf8) {
+            yangshipinExtractScript = content
+        }
         if let url = Bundle.main.url(forResource: "cctv_automation", withExtension: "js"),
            let content = try? String(contentsOf: url, encoding: .utf8) {
             cctvAutomationScript = content
@@ -233,6 +243,11 @@ final class WebViewModel: NSObject, ObservableObject {
         let controller = WKUserContentController()
         controller.add(self, name: "bridge")
         controller.add(self, name: "diag")
+        if kind == .yangshipin, !yangshipinGateScript.isEmpty {
+            controller.addUserScript(
+                WKUserScript(source: yangshipinGateScript, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+            )
+        }
         if kind == .cctv || kind == .probe {
             if !cctvNativeHlsScript.isEmpty {
                 controller.addUserScript(
@@ -382,6 +397,7 @@ final class WebViewModel: NSObject, ObservableObject {
         yangshipinBootstrapTimeoutTask?.cancel()
         yangshipinBootstrapTimeoutTask = nil
         if playbackMode == .cctv {
+            setYangshipinArmed(false)
             suspend(yangshipinWebView)
         }
     }
@@ -399,9 +415,22 @@ final class WebViewModel: NSObject, ObservableObject {
 
     private func pauseMedia(in webView: WKWebView) {
         webView.evaluateJavaScript(
-            "document.querySelectorAll('video,audio').forEach(function(m){ try { m.pause(); } catch(e) {} });",
+            """
+            window.__lwtvYangshipinArmed = false;
+            document.querySelectorAll('video,audio').forEach(function(m){
+                try { m.muted = true; m.volume = 0; m.pause(); } catch(e) {}
+            });
+            """,
             completionHandler: nil
         )
+    }
+
+    private func setYangshipinArmed(_ armed: Bool) {
+        yangshipinWebView.evaluateJavaScript(
+            "window.__lwtvYangshipinArmed = \(armed ? "true" : "false");",
+            completionHandler: nil
+        )
+        diagnostics.log("media", "yangshipin armed=\(armed)")
     }
 
     private func suspend(
@@ -473,9 +502,11 @@ final class WebViewModel: NSObject, ObservableObject {
                     guard generation == self.mediaGeneration else { return }
                     self.diagnostics.log("media", "activated \(label) gen=\(generation) state=\(state.rawValue)")
                     if webView === self.yangshipinWebView {
+                        self.setYangshipinArmed(self.playbackMode == .yangshipin && !self.isCompareMode)
                         self.yangshipinReadyToClick = true
                         self.flushPendingYangshipinClick()
                     } else {
+                        self.setYangshipinArmed(false)
                         self.yangshipinReadyToClick = false
                     }
                     completion()
@@ -519,6 +550,7 @@ final class WebViewModel: NSObject, ObservableObject {
             guard let slug = channel.cctvSlug else { return }
             playbackMode = .cctv
             pendingYangshipinDomIndex = nil
+            setYangshipinArmed(false)
             diagnostics.log("session", "switch CCTV \(slug)")
             loadCctvPage(for: slug)
             activate(cctvWebView)
@@ -727,7 +759,10 @@ final class WebViewModel: NSObject, ObservableObject {
             combined = consoleBridge + "\n" + bridgeShimScript + "\n" + cctvAutomationScript
         } else {
             let platformSpoof = "Object.defineProperty(navigator, 'platform', { get: function() { return 'Win32'; } });"
-            combined = consoleBridge + "\n" + platformSpoof + "\n" + bridgeShimScript + "\n" + automationScript
+            let yangshipinBody = (playbackMode == .yangshipin && !isCompareMode)
+                ? automationScript
+                : yangshipinExtractScript
+            combined = consoleBridge + "\n" + platformSpoof + "\n" + bridgeShimScript + "\n" + yangshipinBody
         }
         target.evaluateJavaScript(combined) { _, error in
             if let error {
@@ -859,6 +894,9 @@ extension WebViewModel: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         let navigationID = UUID().uuidString
         activeDiagnosticNavigationIDs[ObjectIdentifier(webView)] = navigationID
+        if webView === yangshipinWebView {
+            setYangshipinArmed(playbackMode == .yangshipin && !isCompareMode)
+        }
         guard webView === cctvWebView || webView === probeWebView else { return }
         let js = "window.__lwtvRegisterNativeDocument && window.__lwtvRegisterNativeDocument('\(navigationID)');"
         webView.evaluateJavaScript(js) { [weak self, weak webView] _, error in
@@ -888,9 +926,11 @@ extension WebViewModel: WKNavigationDelegate {
         injectScripts(for: .yangshipin, into: webView)
         if playbackMode != .yangshipin {
             yangshipinDidInitInBackground = true
+            setYangshipinArmed(false)
             suspend(yangshipinWebView)
         } else {
             yangshipinDidInitInBackground = false
+            setYangshipinArmed(true)
             flushPendingYangshipinClick()
         }
     }
@@ -1010,7 +1050,14 @@ extension WebViewModel: WKScriptMessageHandler {
             case "console":
                 if let level = body["level"] as? String, let msg = body["data"] as? String,
                    level == "error" || msg.contains("[CCTV]") {
-                    let marker = msg.contains("play rejected") ? "cctv play rejected" : "filtered console event"
+                    let marker: String
+                    if msg.contains("[CCTV]") {
+                        marker = String(msg.prefix(180))
+                    } else if msg.contains("play rejected") {
+                        marker = "cctv play rejected"
+                    } else {
+                        marker = "filtered console event"
+                    }
                     self.diagnostics.log("js-\(level)", marker)
                 }
 
