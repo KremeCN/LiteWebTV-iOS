@@ -2,39 +2,42 @@ import Foundation
 import WebKit
 import Combine
 
+/// 播放源模式（当前 WebView 实际加载的页面类型）
+enum PlaybackMode {
+    case yangshipin
+    case cctv
+}
+
 /// WebView 核心 ViewModel
-/// Maps from Android: WebAppInterface.kt + MainActivity.kt (initWebView, shouldInterceptRequest)
-///
-/// 职责：
-/// 1. 配置 WKWebView（JS 开启、UA 伪装、自动播放）
-/// 2. 注入 bridge_shim.js + automation.js
-/// 3. 接收 JS 消息（频道列表、节目单、标题、幕布信号）
-/// 4. 广告拦截（WKContentRuleList）
-/// 5. 频道切换逻辑
 final class WebViewModel: NSObject, ObservableObject {
 
     // MARK: - Published State
 
-    @Published var channels: [ChannelItem] = []
+    @Published var logicalChannels: [LogicalChannel] = []
     @Published var programs: [ProgramItem] = []
     @Published var currentTitle: String = ""
     @Published var shouldDismissSplash: Bool = false
     @Published var currentChannelIndex: Int = 0
     @Published var currentProgramIndex: Int = 0
+    @Published private(set) var playbackMode: PlaybackMode = SourceCapability.meetsMinimumOSVersion ? .yangshipin : .cctv
+    @Published private(set) var yangshipinPlayable: Bool = SourceCapability.meetsMinimumOSVersion
+    @Published var playbackError: String?
 
     // MARK: - Constants
 
-    private let targetURL = "https://www.yangshipin.cn/tv/home"
+    private let yangshipinURL = "https://www.yangshipin.cn/tv/home"
     private let pcUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     private let beijingTimeZone = TimeZone(identifier: "Asia/Shanghai")!
 
-    /// 换台防抖保护（3 秒）
     private let switchDelay: TimeInterval = 3.0
     private var lastSwitchTime: Date = .distantPast
-
-    /// 换台开始时间，用于过滤旧视频的播放信号
     private var switchStartTime: Date = .distantPast
     private var scheduleTicker: AnyCancellable?
+
+    private var activeCctvSlug: String?
+    private var pendingYangshipinDomIndex: Int?
+    private var cctvURLOptions: [URL] = []
+    private var cctvURLIndex = 0
 
     // MARK: - WebView
 
@@ -44,6 +47,7 @@ final class WebViewModel: NSObject, ObservableObject {
 
     private var bridgeShimScript: String = ""
     private var automationScript: String = ""
+    private var cctvAutomationScript: String = ""
 
     // MARK: - Init
 
@@ -51,13 +55,39 @@ final class WebViewModel: NSObject, ObservableObject {
         super.init()
         loadScripts()
         configureWebView()
-        loadTargetPage()
+        startPlaybackRouting()
         startScheduleTicker()
     }
 
     deinit {
         scheduleTicker?.cancel()
         webView?.configuration.userContentController.removeScriptMessageHandler(forName: "bridge")
+    }
+
+    // MARK: - Public Helpers
+
+    var currentLogicalChannel: LogicalChannel? {
+        guard currentChannelIndex >= 0, currentChannelIndex < logicalChannels.count else { return nil }
+        return logicalChannels[currentChannelIndex]
+    }
+
+    var canSwitchSource: Bool {
+        yangshipinPlayable && (currentLogicalChannel?.canSwitchSource ?? false)
+    }
+
+    var currentSourceLabel: String {
+        currentLogicalChannel?.selectedSource.displayName ?? ""
+    }
+
+    func selectSource(_ source: StreamSource) {
+        guard let channel = currentLogicalChannel,
+              channel.availableSources.contains(source),
+              channel.selectedSource != source else { return }
+
+        SourcePreferenceStore.save(channelId: channel.id, source: source)
+        logicalChannels[currentChannelIndex].selectedSource = source
+        playbackError = nil
+        applyLogicalChannel(at: currentChannelIndex)
     }
 
     // MARK: - Script Loading
@@ -72,6 +102,11 @@ final class WebViewModel: NSObject, ObservableObject {
            let autoContent = try? String(contentsOf: autoURL, encoding: .utf8) {
             automationScript = autoContent
         }
+
+        if let cctvURL = Bundle.main.url(forResource: "cctv_automation", withExtension: "js"),
+           let cctvContent = try? String(contentsOf: cctvURL, encoding: .utf8) {
+            cctvAutomationScript = cctvContent
+        }
     }
 
     // MARK: - WebView Configuration
@@ -79,19 +114,14 @@ final class WebViewModel: NSObject, ObservableObject {
     private func configureWebView() {
         let config = WKWebViewConfiguration()
 
-        // JS 通信桥
         let contentController = WKUserContentController()
         contentController.add(self, name: "bridge")
         config.userContentController = contentController
 
-        // 允许媒体自动播放（不要求用户手势）
-        // Maps from Android: webSettings.mediaPlaybackRequiresUserGesture = false
         config.mediaTypesRequiringUserActionForPlayback = []
         config.allowsInlineMediaPlayback = true
 
         webView = WKWebView(frame: .zero, configuration: config)
-        webView.customUserAgent = pcUserAgent
-        
         webView.navigationDelegate = self
         webView.allowsBackForwardNavigationGestures = false
         webView.scrollView.isScrollEnabled = false
@@ -99,84 +129,162 @@ final class WebViewModel: NSObject, ObservableObject {
         webView.backgroundColor = .black
         webView.scrollView.backgroundColor = .black
 
-        // 设置内容拦截规则（广告/追踪/字体/图片）
         installContentRules()
     }
 
-    // MARK: - Content Rules (Ad-blocking)
-    // Maps from Android: shouldInterceptRequest in MainActivity.kt:707-754
+    // MARK: - Playback Routing
+
+    private func startPlaybackRouting() {
+        SourceCapability.probeMediaSourceSupport(in: webView) { [weak self] supported in
+            guard let self = self else { return }
+            self.yangshipinPlayable = supported
+            if supported {
+                self.enterYangshipinCapabilityMode()
+            } else {
+                self.enterCctvOnlyMode(startIndex: 0)
+            }
+        }
+    }
+
+    private func enterYangshipinCapabilityMode() {
+        playbackMode = .yangshipin
+        webView.customUserAgent = pcUserAgent
+        loadYangshipinHome()
+    }
+
+    private func enterCctvOnlyMode(startIndex: Int) {
+        yangshipinPlayable = false
+        playbackMode = .cctv
+        webView.customUserAgent = nil
+        currentChannelIndex = min(max(startIndex, 0), CCTVCatalog.channels.count - 1)
+        logicalChannels = ChannelMerger.cctvOnlyChannels(activeIndex: currentChannelIndex)
+        applyLogicalChannel(at: currentChannelIndex)
+    }
+
+    private func loadYangshipinHome() {
+        guard let url = URL(string: yangshipinURL) else { return }
+        webView.load(URLRequest(url: url))
+    }
+
+    private func applyLogicalChannel(at index: Int) {
+        guard index >= 0, index < logicalChannels.count else { return }
+
+        currentChannelIndex = index
+        updateActiveChannelHighlight()
+        switchStartTime = Date()
+        playbackError = nil
+
+        let channel = logicalChannels[index]
+        switch channel.selectedSource {
+        case .cctv:
+            guard let slug = channel.cctvSlug else { return }
+            playbackMode = .cctv
+            webView.customUserAgent = nil
+            loadCctvPage(for: slug)
+        case .yangshipin:
+            guard let domIndex = channel.yangshipinDomIndex else { return }
+            playbackMode = .yangshipin
+            webView.customUserAgent = pcUserAgent
+            loadYangshipinChannel(domIndex: domIndex)
+        }
+    }
+
+    private func loadYangshipinChannel(domIndex: Int) {
+        pendingYangshipinDomIndex = domIndex
+        if webView.url?.host?.contains("yangshipin.cn") == true {
+            clickYangshipinChannel(domIndex: domIndex)
+            pendingYangshipinDomIndex = nil
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.webView.evaluateJavaScript("window.extractData()", completionHandler: nil)
+            }
+        } else {
+            loadYangshipinHome()
+        }
+    }
+
+    private func loadCctvPage(for slug: String) {
+        activeCctvSlug = slug
+        cctvURLOptions = CCTVCatalog.pageURLs(for: slug)
+        cctvURLIndex = 0
+        loadCurrentCctvURL()
+        fetchEpg(for: slug)
+    }
+
+    private func loadCurrentCctvURL() {
+        guard cctvURLIndex < cctvURLOptions.count else {
+            playbackError = "该频道暂时无法播放"
+            shouldDismissSplash = true
+            return
+        }
+        webView.load(URLRequest(url: cctvURLOptions[cctvURLIndex]))
+    }
+
+    private func retryNextCctvURL() {
+        cctvURLIndex += 1
+        if cctvURLIndex < cctvURLOptions.count {
+            loadCurrentCctvURL()
+        } else {
+            playbackError = "该频道暂时无法播放"
+            shouldDismissSplash = true
+        }
+    }
+
+    private func updateActiveChannelHighlight() {
+        for idx in logicalChannels.indices {
+            logicalChannels[idx].isActive = idx == currentChannelIndex
+        }
+    }
+
+    private func updateLogicalChannels(from yangshipinItems: [ChannelItem]) {
+        logicalChannels = ChannelMerger.merge(yangshipinItems: yangshipinItems)
+
+        if let activeDomIndex = yangshipinItems.firstIndex(where: { $0.isActive }) {
+            let domIndex = yangshipinItems[activeDomIndex].index
+            if let listIndex = logicalChannels.firstIndex(where: { $0.yangshipinDomIndex == domIndex }) {
+                currentChannelIndex = listIndex
+            }
+        } else if currentChannelIndex >= logicalChannels.count {
+            currentChannelIndex = 0
+        }
+
+        updateActiveChannelHighlight()
+    }
+
+    // MARK: - Content Rules
 
     private func installContentRules() {
-        // WKContentRuleList 使用 Safari Content Blocker 的 JSON 格式
         let rules: [[String: Any]] = [
-            // 1. 字体文件拦截（注意：WebKit Content Blocker 不支持 `?` 量词）
-            ["trigger": ["url-filter": ".*\\.woff2"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*\\.woff"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*\\.ttf"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*\\.otf"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*\\.eot"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*/fonts/"],
-             "action": ["type": "block"]],
-
-            // 2. 统计追踪 & 广告 & 埋点
-            // 注意：不拦截图片！WKContentRuleList 无法区分网站 UI 图片和广告图片，
-            ["trigger": ["url-filter": "hm\\.baidu\\.com"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": "tongji\\.baidu\\.com"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": "google-analytics"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": "googletagmanager"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": "s\\.cnzz\\.com"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": "umeng\\.com"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*/beacon"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*/trace"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*/report"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*/collect"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*/monitor"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*/tracking"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*/analytics"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*/tongji"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*/datacenter"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": "openapi-trace"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": "tracing"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": "sentry"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": "bugly"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": "hotfix"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": "crash"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": "ad\\.doubleclick"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": "pagead"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": "adservice"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": "adsense"],
-             "action": ["type": "block"]],
-            ["trigger": ["url-filter": "adsbygoogle"],
-             "action": ["type": "block"]],
+            ["trigger": ["url-filter": ".*\\.woff2"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": ".*\\.woff"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": ".*\\.ttf"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": ".*\\.otf"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": ".*\\.eot"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": ".*/fonts/"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": "hm\\.baidu\\.com"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": "tongji\\.baidu\\.com"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": "google-analytics"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": "googletagmanager"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": "s\\.cnzz\\.com"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": "umeng\\.com"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": ".*/beacon"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": ".*/trace"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": ".*/report"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": ".*/monitor"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": ".*/tracking"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": ".*/analytics"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": ".*/tongji"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": ".*/datacenter"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": "openapi-trace"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": "tracing"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": "sentry"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": "bugly"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": "hotfix"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": "crash"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": "ad\\.doubleclick"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": "pagead"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": "adservice"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": "adsense"], "action": ["type": "block"]],
+            ["trigger": ["url-filter": "adsbygoogle"], "action": ["type": "block"]],
         ]
 
         guard let jsonData = try? JSONSerialization.data(withJSONObject: rules),
@@ -185,7 +293,7 @@ final class WebViewModel: NSObject, ObservableObject {
         WKContentRuleListStore.default().compileContentRuleList(
             forIdentifier: "LiteWebTVBlockList",
             encodedContentRuleList: jsonString
-        ) { [weak self] ruleList, error in
+        ) { [weak self] ruleList, _ in
             if let ruleList = ruleList {
                 DispatchQueue.main.async {
                     self?.webView.configuration.userContentController.add(ruleList)
@@ -194,25 +302,81 @@ final class WebViewModel: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - Page Loading
-
-    private func loadTargetPage() {
-        guard let url = URL(string: targetURL) else { return }
-        webView.load(URLRequest(url: url))
-    }
-
     private func startScheduleTicker() {
         scheduleTicker = Timer.publish(every: 30, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
-                self?.refreshCurrentProgram(using: nil)
+                guard let self = self else { return }
+                if self.playbackMode == .cctv, let slug = self.activeCctvSlug {
+                    self.fetchEpg(for: slug)
+                } else if self.playbackMode == .yangshipin {
+                    self.refreshCurrentProgram(using: nil)
+                }
             }
+    }
+
+    // MARK: - EPG (CCTV)
+
+    private func fetchEpg(for slug: String) {
+        guard let url = CCTVCatalog.epgURL(for: slug) else { return }
+
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
+            guard let self = self, let data = data, error == nil else { return }
+
+            guard let response = try? JSONDecoder().decode(CCTVEPGResponse.self, from: data),
+                  let channel = response.data?[slug],
+                  let entries = channel.list else {
+                return
+            }
+
+            DispatchQueue.main.async {
+                self.applyEpgEntries(entries, liveTitle: channel.isLive)
+            }
+        }.resume()
+    }
+
+    private func applyEpgEntries(_ entries: [CCTVEPGEntry], liveTitle: String?) {
+        let now = Int(Date().timeIntervalSince1970)
+        var list: [ProgramItem] = []
+        var activeIndex = 0
+
+        for (index, entry) in entries.enumerated() {
+            let isCurrent = entry.startTime <= now && now < entry.endTime
+            list.append(ProgramItem(time: entry.showTime, title: entry.title, isCurrent: isCurrent))
+            if isCurrent {
+                activeIndex = index
+            }
+        }
+
+        if list.isEmpty {
+            programs = []
+            currentProgramIndex = 0
+            if let liveTitle, !liveTitle.isEmpty {
+                currentTitle = liveTitle
+            }
+            return
+        }
+
+        if activeIndex == 0, list.first?.isCurrent == false {
+            activeIndex = entries.indices.last { entries[$0].startTime <= now } ?? 0
+            for idx in list.indices {
+                list[idx].isCurrent = idx == activeIndex
+            }
+        }
+
+        programs = list
+        currentProgramIndex = activeIndex
+
+        if activeIndex < list.count {
+            currentTitle = list[activeIndex].title
+        } else if let liveTitle, !liveTitle.isEmpty {
+            currentTitle = liveTitle
+        }
     }
 
     // MARK: - Script Injection
 
-    private func injectScripts() {
-        // 给 WKWebView 添加 console.log 抓取，用于调试卡加载原因
+    private func injectScripts(for mode: PlaybackMode) {
         let consoleBridge = """
         (function() {
             var oldLog = console.log;
@@ -233,14 +397,21 @@ final class WebViewModel: NSObject, ObservableObject {
                 var msg = Array.from(arguments).map(String).join(' ');
                 window.webkit.messageHandlers.bridge.postMessage({type: 'console', level: 'error', data: msg});
             };
-            
-            // 顺便覆盖 navigator.platform，伪装得更像 PC
-            Object.defineProperty(navigator, 'platform', { get: function() { return 'Win32'; } });
         })();
         """
-        
-        // 先注入 consoleBridge，再注入 shim，再注入自动化脚本
-        let combinedScript = consoleBridge + "\n" + bridgeShimScript + "\n" + automationScript
+
+        let platformSpoof = """
+        Object.defineProperty(navigator, 'platform', { get: function() { return 'Win32'; } });
+        """
+
+        let automation = mode == .cctv ? cctvAutomationScript : automationScript
+        let combinedScript: String
+        if mode == .cctv {
+            combinedScript = consoleBridge + "\n" + bridgeShimScript + "\n" + automation
+        } else {
+            combinedScript = consoleBridge + "\n" + platformSpoof + "\n" + bridgeShimScript + "\n" + automation
+        }
+
         webView.evaluateJavaScript(combinedScript) { _, error in
             if let error = error {
                 print("[LiteWebTV] Script injection error: \(error.localizedDescription)")
@@ -250,77 +421,43 @@ final class WebViewModel: NSObject, ObservableObject {
 
     // MARK: - Channel Switching
 
-    /// 方向键/手势 快速换台
-    /// Maps from Android: MainActivity.kt quickSwitchChannel()
     func quickSwitchChannel(isNext: Bool) -> (allowed: Bool, channelName: String?) {
-        guard !channels.isEmpty else { return (false, nil) }
+        guard !logicalChannels.isEmpty else { return (false, nil) }
 
-        // 防抖
         let now = Date()
         if now.timeIntervalSince(lastSwitchTime) < switchDelay {
             return (false, nil)
         }
         lastSwitchTime = now
 
-        // 计算目标索引
         var targetListIndex = isNext ? currentChannelIndex + 1 : currentChannelIndex - 1
-        if targetListIndex >= channels.count { targetListIndex = 0 }
-        if targetListIndex < 0 { targetListIndex = channels.count - 1 }
+        if targetListIndex >= logicalChannels.count { targetListIndex = 0 }
+        if targetListIndex < 0 { targetListIndex = logicalChannels.count - 1 }
 
-        let targetItem = channels[targetListIndex]
-        currentChannelIndex = targetListIndex
-        switchStartTime = Date()
-
-        // 点击 DOM
-        let domIndex = targetItem.index
-        let js = """
-        (function() {
-            const items = document.querySelectorAll('.tv-main-con-r-list-left .oveerflow-1');
-            if(items[\(domIndex)]) {
-                items[\(domIndex)].click();
-            }
-        })();
-        """
-        webView.evaluateJavaScript(js, completionHandler: nil)
-
-        // 延迟 1.5s 后提取数据
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            self?.webView.evaluateJavaScript("window.extractData()", completionHandler: nil)
-        }
-
-        return (true, targetItem.name)
+        let targetName = logicalChannels[targetListIndex].name
+        applyLogicalChannel(at: targetListIndex)
+        return (true, targetName)
     }
 
-    /// 侧边栏点击换台
-    /// Maps from Android: MainActivity.kt switchChannel(item)
-    func switchChannel(_ item: ChannelItem) -> String {
-        let targetName = item.name
-
-        if let listIndex = channels.firstIndex(where: { $0.index == item.index }) {
-            currentChannelIndex = listIndex
-        }
-
-        switchStartTime = Date()
-
-        let domIndex = item.index
-        let js = """
-        (function() {
-            const items = document.querySelectorAll('.tv-main-con-r-list-left .oveerflow-1');
-            if(items[\(domIndex)]) {
-                items[\(domIndex)].click();
-            }
-        })();
-        """
-        webView.evaluateJavaScript(js, completionHandler: nil)
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            self?.webView.evaluateJavaScript("window.extractData()", completionHandler: nil)
-        }
-
+    func switchChannel(at listIndex: Int) -> String {
+        guard listIndex >= 0, listIndex < logicalChannels.count else { return "" }
+        let targetName = logicalChannels[listIndex].name
+        applyLogicalChannel(at: listIndex)
         return targetName
     }
 
-    /// 双击播放/暂停
+    private func clickYangshipinChannel(domIndex: Int) {
+        let js = """
+        (function() {
+            const items = document.querySelectorAll('.tv-main-con-r-list-left .oveerflow-1');
+            if(items[\(domIndex)]) {
+                items[\(domIndex)].click();
+            }
+        })();
+        """
+        webView.evaluateJavaScript(js, completionHandler: nil)
+    }
+
     func togglePlayPause() {
         let js = """
         (function(){
@@ -334,14 +471,11 @@ final class WebViewModel: NSObject, ObservableObject {
         webView.evaluateJavaScript(js, completionHandler: nil)
     }
 
-    /// 手动触发脚本注入（菜单键功能）
     func manualInject() {
-        injectScripts()
+        injectScripts(for: playbackMode)
     }
 
-    /// 视频播放信号处理
     func onDismissSplash() {
-        // 过滤换台后 1.5 秒内的旧视频信号
         let now = Date()
         if now.timeIntervalSince(switchStartTime) < 1.5 {
             return
@@ -349,9 +483,9 @@ final class WebViewModel: NSObject, ObservableObject {
         shouldDismissSplash = true
     }
 
-    /// 重置幕布状态（换台前调用）
     func resetSplash() {
         shouldDismissSplash = false
+        playbackError = nil
     }
 }
 
@@ -359,12 +493,77 @@ final class WebViewModel: NSObject, ObservableObject {
 
 extension WebViewModel: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        injectScripts()
+        let host = webView.url?.host?.lowercased() ?? ""
+        if host.contains("cctv.com") || host.contains("cctv.cn") {
+            injectScripts(for: .cctv)
+            if let slug = activeCctvSlug {
+                fetchEpg(for: slug)
+            }
+        } else if host.contains("yangshipin.cn") {
+            injectScripts(for: .yangshipin)
+            if let domIndex = pendingYangshipinDomIndex {
+                clickYangshipinChannel(domIndex: domIndex)
+                pendingYangshipinDomIndex = nil
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                    self?.webView.evaluateJavaScript("window.extractData()", completionHandler: nil)
+                }
+            }
+        }
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didFail navigation: WKNavigation!,
+        withError error: Error
+    ) {
+        handleNavigationFailure(error)
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didFailProvisionalNavigation navigation: WKNavigation!,
+        withError error: Error
+    ) {
+        handleNavigationFailure(error)
+    }
+
+    private func handleNavigationFailure(_ error: Error) {
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
+            return
+        }
+        if playbackMode == .cctv {
+            retryNextCctvURL()
+        }
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        guard let url = navigationAction.request.url else {
+            decisionHandler(.allow)
+            return
+        }
+
+        let scheme = url.scheme?.lowercased() ?? ""
+        let absolute = url.absoluteString.lowercased()
+
+        if scheme == "cntvcbox"
+            || scheme == "itms-apps"
+            || scheme == "itms"
+            || absolute.contains("apps.apple.com")
+            || absolute.contains("itunes.apple.com") {
+            decisionHandler(.cancel)
+            return
+        }
+
+        decisionHandler(.allow)
     }
 }
 
 // MARK: - WKScriptMessageHandler
-// Maps from Android: WebAppInterface.kt
 
 extension WebViewModel: WKScriptMessageHandler {
     func userContentController(
@@ -379,17 +578,16 @@ extension WebViewModel: WKScriptMessageHandler {
 
             switch type {
             case "channelList":
+                guard self.yangshipinPlayable else { return }
                 guard let jsonString = body["data"] as? String,
                       let data = jsonString.data(using: .utf8),
                       let list = try? JSONDecoder().decode([ChannelItem].self, from: data)
                 else { return }
 
-                self.channels = list
-                if let activeIndex = list.firstIndex(where: { $0.isActive }) {
-                    self.currentChannelIndex = activeIndex
-                }
+                self.updateLogicalChannels(from: list)
 
             case "programList":
+                guard self.playbackMode == .yangshipin else { return }
                 guard let jsonString = body["data"] as? String,
                       let data = jsonString.data(using: .utf8),
                       let list = try? JSONDecoder().decode([ProgramItem].self, from: data)
@@ -398,12 +596,16 @@ extension WebViewModel: WKScriptMessageHandler {
                 self.refreshCurrentProgram(using: list)
 
             case "title":
-                // 废弃原网页不靠谱的 title（受海外浏览器时区干扰）
-                // 既然我们在 programList 阶段已经用北京时间绝对算出了正确的当前节目，直接用我们的！
+                if self.playbackMode == .cctv {
+                    if let title = body["data"] as? String, !title.isEmpty {
+                        self.currentTitle = title
+                    }
+                    return
+                }
                 if !self.programs.isEmpty && self.currentProgramIndex < self.programs.count {
                     self.currentTitle = self.programs[self.currentProgramIndex].title
                 } else if let title = body["data"] as? String, !title.isEmpty {
-                    self.currentTitle = title // 刚开屏或无节目的兜底
+                    self.currentTitle = title
                 }
 
             case "dismissSplash":
