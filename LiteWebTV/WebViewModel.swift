@@ -135,49 +135,46 @@ final class WebViewModel: NSObject, ObservableObject {
         let config = WKWebViewConfiguration()
         let contentController = WKUserContentController()
         contentController.add(self, name: "bridge")
-        if kind == .cctv {
-            contentController.addUserScript(
-                WKUserScript(
-                    source: cctvSafariUAScript,
-                    injectionTime: .atDocumentStart,
-                    forMainFrameOnly: false
-                )
+        let startScript = kind == .cctv ? cctvSafariUAScript : yangshipinPlaybackGateScript
+        contentController.addUserScript(
+            WKUserScript(
+                source: startScript,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: false
             )
-        }
+        )
         config.userContentController = contentController
         config.mediaTypesRequiringUserActionForPlayback = []
-        // 央视频要页内 MSE；央视网关掉页内播放，让系统播放器接手（和 Safari iPhone 一样）。
-        config.allowsInlineMediaPlayback = (kind == .yangshipin)
+        // FairPlay 要挂在页内 video 上；关掉页内播放会让 liveplayer 走「请使用电脑端」。
+        config.allowsInlineMediaPlayback = true
         config.defaultWebpagePreferences.preferredContentMode = (kind == .cctv) ? .mobile : .desktop
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
         webView.allowsBackForwardNavigationGestures = false
-        webView.scrollView.isScrollEnabled = (kind == .cctv)
+        webView.scrollView.isScrollEnabled = false
         webView.isOpaque = true
         webView.backgroundColor = .black
         webView.scrollView.backgroundColor = .black
         return webView
     }
 
-    /// 央视网文档开始：锁 Safari iPhone UA，并包住 `createLivePlayer` 关掉跳客户端。
+    /// 央视网文档开始：锁在 `Navigator.prototype` 上。只改 `navigator` 实例时，
+    /// iOS 26 WKWebView 仍可能读到没有 `Safari/` 的串，`isIosDrmPlayer()` 就会弹「请使用电脑端」。
     private var cctvSafariUAScript: String {
         let ua = cctvUserAgent
         return """
         (function() {
-            var host = String(location.hostname || '').toLowerCase();
-            if (host.indexOf('yangshipin') !== -1) return;
-            if (host && host.indexOf('cctv') === -1 && host.indexOf('cntv') === -1) return;
             var ua = '\(ua)';
             var app = ua.indexOf('Mozilla/') === 0 ? ua.slice(8) : ua;
             function lockNav(key, value) {
-                try {
-                    Object.defineProperty(navigator, key, {
-                        configurable: true,
-                        enumerable: true,
-                        get: function () { return value; }
-                    });
-                } catch (e) {}
+                var cap = {
+                    configurable: true,
+                    enumerable: true,
+                    get: function () { return value; }
+                };
+                try { Object.defineProperty(navigator, key, cap); } catch (e) {}
+                try { Object.defineProperty(Navigator.prototype, key, cap); } catch (e) {}
             }
             lockNav('userAgent', ua);
             lockNav('appVersion', app);
@@ -190,26 +187,6 @@ final class WebViewModel: NSObject, ObservableObject {
                         }
                     };
                 }
-            } catch (e) {}
-
-            try {
-                Object.defineProperty(HTMLVideoElement.prototype, 'playsInline', {
-                    configurable: true,
-                    enumerable: true,
-                    get: function () { return false; },
-                    set: function () {}
-                });
-            } catch (e) {}
-
-            try {
-                var origSet = Element.prototype.setAttribute;
-                Element.prototype.setAttribute = function (name, value) {
-                    var n = String(name || '').toLowerCase();
-                    if (n === 'playsinline' || n === 'webkit-playsinline' || n === 'x5-playsinline') {
-                        return;
-                    }
-                    return origSet.apply(this, arguments);
-                };
             } catch (e) {}
 
             var realCreate = null;
@@ -233,6 +210,23 @@ final class WebViewModel: NSObject, ObservableObject {
         """
     }
 
+    /// 后台央视频在刮频道表时不能出声。新文档会重置这个开关。
+    private var yangshipinPlaybackGateScript: String {
+        """
+        (function() {
+            window.__lwtvAllowPlay = false;
+            var orig = HTMLMediaElement.prototype.play;
+            HTMLMediaElement.prototype.play = function () {
+                if (!window.__lwtvAllowPlay) {
+                    try { this.pause(); this.muted = true; } catch (e) {}
+                    return Promise.resolve();
+                }
+                return orig.apply(this, arguments);
+            };
+        })();
+        """
+    }
+
     // MARK: - Playback Routing
 
     private func startPlaybackRouting() {
@@ -248,9 +242,39 @@ final class WebViewModel: NSObject, ObservableObject {
     }
 
     private func enterYangshipinCapabilityMode() {
-        playbackMode = .yangshipin
+        if shouldRestoreCctvOnLaunch() {
+            setYangshipinPlaybackAllowed(false)
+            playbackMode = .cctv
+            if let slug = launchCctvSlug() {
+                loadCctvPage(for: slug)
+            }
+        } else {
+            setYangshipinPlaybackAllowed(true)
+            playbackMode = .yangshipin
+        }
         beginYangshipinBootstrap()
         loadYangshipinHome()
+    }
+
+    private func shouldRestoreCctvOnLaunch() -> Bool {
+        guard let id = SourcePreferenceStore.lastChannelId else { return false }
+        return SourcePreferenceStore.preferredSource(for: id) == .cctv
+    }
+
+    private func launchCctvSlug() -> String? {
+        guard let id = SourcePreferenceStore.lastChannelId,
+              CCTVCatalog.entry(for: id) != nil else { return nil }
+        return id
+    }
+
+    private func setYangshipinPlaybackAllowed(_ allowed: Bool) {
+        yangshipinWebView.evaluateJavaScript(
+            "window.__lwtvAllowPlay = \(allowed ? "true" : "false");",
+            completionHandler: nil
+        )
+        if !allowed {
+            pauseMedia(in: yangshipinWebView)
+        }
     }
 
     private func enterCctvOnlyMode(startIndex: Int, markYangshipinUnavailable: Bool = true) {
@@ -259,6 +283,7 @@ final class WebViewModel: NSObject, ObservableObject {
             yangshipinPlayable = false
         }
         pauseMedia(in: yangshipinWebView)
+        setYangshipinPlaybackAllowed(false)
         playbackMode = .cctv
         currentChannelIndex = min(max(startIndex, 0), CCTVCatalog.channels.count - 1)
         logicalChannels = ChannelMerger.cctvOnlyChannels(activeIndex: currentChannelIndex)
@@ -316,7 +341,7 @@ final class WebViewModel: NSObject, ObservableObject {
         switch channel.selectedSource {
         case .cctv:
             guard let slug = channel.cctvSlug else { return }
-            pauseMedia(in: yangshipinWebView)
+            setYangshipinPlaybackAllowed(false)
             playbackMode = .cctv
             pendingYangshipinDomIndex = nil
             loadCctvPage(for: slug)
@@ -324,6 +349,7 @@ final class WebViewModel: NSObject, ObservableObject {
             guard let domIndex = channel.yangshipinDomIndex else { return }
             pauseMedia(in: cctvWebView)
             playbackMode = .yangshipin
+            setYangshipinPlaybackAllowed(true)
             activeCctvSlug = nil
             programs = []
             currentProgramIndex = 0
@@ -402,6 +428,14 @@ final class WebViewModel: NSObject, ObservableObject {
                 currentChannelIndex = 0
             }
             updateActiveChannelHighlight()
+            if logicalChannels.indices.contains(currentChannelIndex) {
+                let channel = logicalChannels[currentChannelIndex]
+                if playbackMode == .cctv,
+                   channel.selectedSource == .cctv,
+                   activeCctvSlug == channel.cctvSlug {
+                    return
+                }
+            }
             applyLogicalChannel(at: currentChannelIndex)
             return
         }
@@ -587,7 +621,9 @@ final class WebViewModel: NSObject, ObservableObject {
         if mode == .cctv {
             combinedScript = consoleBridge + "\n" + bridgeShimScript + "\n" + automation
         } else {
-            combinedScript = consoleBridge + "\n" + platformSpoof + "\n" + bridgeShimScript + "\n" + automation
+            let allowPlay = playbackMode == .yangshipin
+            combinedScript = "window.__lwtvAllowPlay = \(allowPlay);\n"
+                + consoleBridge + "\n" + platformSpoof + "\n" + bridgeShimScript + "\n" + automation
         }
 
         (target ?? webView).evaluateJavaScript(combinedScript) { _, error in
@@ -680,6 +716,9 @@ extension WebViewModel: WKNavigationDelegate {
         }
 
         injectScripts(for: .yangshipin, into: webView)
+        if playbackMode == .cctv {
+            setYangshipinPlaybackAllowed(false)
+        }
         if let domIndex = pendingYangshipinDomIndex {
             clickYangshipinChannel(domIndex: domIndex)
             pendingYangshipinDomIndex = nil
@@ -694,7 +733,7 @@ extension WebViewModel: WKNavigationDelegate {
         didFail navigation: WKNavigation!,
         withError error: Error
     ) {
-        handleNavigationFailure(error)
+        handleNavigationFailure(webView, error)
     }
 
     func webView(
@@ -702,19 +741,19 @@ extension WebViewModel: WKNavigationDelegate {
         didFailProvisionalNavigation navigation: WKNavigation!,
         withError error: Error
     ) {
-        handleNavigationFailure(error)
+        handleNavigationFailure(webView, error)
     }
 
-    private func handleNavigationFailure(_ error: Error) {
+    private func handleNavigationFailure(_ webView: WKWebView, _ error: Error) {
         let nsError = error as NSError
         if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
             return
         }
-        if playbackMode == .cctv {
+        if webView === cctvWebView {
             retryNextCctvURL()
             return
         }
-        if playbackMode == .yangshipin && yangshipinBootstrapInProgress {
+        if yangshipinBootstrapInProgress {
             print("[LiteWebTV] Yangshipin bootstrap navigation failed, falling back to CCTV")
             enterCctvOnlyMode(startIndex: 0, markYangshipinUnavailable: false)
         }
