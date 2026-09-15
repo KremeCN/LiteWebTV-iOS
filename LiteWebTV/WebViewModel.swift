@@ -46,6 +46,8 @@ final class WebViewModel: NSObject, ObservableObject {
 
     private var activeCctvSlug: String?
     private var pendingYangshipinDomIndex: Int?
+    /// 央视频频道点击必须发生在 `setAllMediaPlaybackSuspended(false)` 之后，否则 MSE 会卡在暂停态。
+    private var yangshipinReadyToClick = false
     private var yangshipinBootstrapInProgress = false
     private var yangshipinBootstrapTimeoutTask: DispatchWorkItem?
     private var hasAppliedLaunchChannel = false
@@ -288,7 +290,7 @@ final class WebViewModel: NSObject, ObservableObject {
             }
         }
         if let oldProbe {
-            suspend(oldProbe, label: "probe-old", completion: finishOldCleanup)
+            suspend(oldProbe, label: "probe-old", closePresentations: true, completion: finishOldCleanup)
         } else {
             finishOldCleanup()
         }
@@ -383,14 +385,24 @@ final class WebViewModel: NSObject, ObservableObject {
         yangshipinWebView.load(URLRequest(url: url))
     }
 
-    private func suspend(_ webView: WKWebView, label: String, completion: @escaping () -> Void) {
+    private func suspend(
+        _ webView: WKWebView,
+        label: String,
+        closePresentations: Bool = false,
+        completion: @escaping () -> Void
+    ) {
         webView.requestMediaPlaybackState { [weak self] state in
             self?.diagnostics.log("media", "state before suspend \(label) raw=\(state.rawValue)")
         }
         webView.setAllMediaPlaybackSuspended(true) { [weak self] in
-            webView.closeAllMediaPresentations {
-                self?.diagnostics.log("media", "suspended \(label)")
+            let finish = {
+                self?.diagnostics.log("media", "suspended \(label) closePresentations=\(closePresentations)")
                 completion()
+            }
+            if closePresentations {
+                webView.closeAllMediaPresentations(finish)
+            } else {
+                finish()
             }
         }
     }
@@ -434,6 +446,12 @@ final class WebViewModel: NSObject, ObservableObject {
                 webView.requestMediaPlaybackState { state in
                     guard generation == self.mediaGeneration else { return }
                     self.diagnostics.log("media", "activated \(label) gen=\(generation) state=\(state.rawValue)")
+                    if webView === self.yangshipinWebView {
+                        self.yangshipinReadyToClick = true
+                        self.flushPendingYangshipinClick()
+                    } else {
+                        self.yangshipinReadyToClick = false
+                    }
                     completion()
                 }
             }
@@ -492,14 +510,21 @@ final class WebViewModel: NSObject, ObservableObject {
 
     private func loadYangshipinChannel(domIndex: Int) {
         pendingYangshipinDomIndex = domIndex
-        if yangshipinWebView.url?.host?.contains("yangshipin.cn") == true {
-            clickYangshipinChannel(domIndex: domIndex)
-            pendingYangshipinDomIndex = nil
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-                self?.yangshipinWebView.evaluateJavaScript("window.extractData()", completionHandler: nil)
-            }
-        } else {
+        if yangshipinWebView.url?.host?.contains("yangshipin.cn") != true {
             loadYangshipinHome()
+        }
+    }
+
+    private func flushPendingYangshipinClick() {
+        guard yangshipinReadyToClick,
+              playbackMode == .yangshipin,
+              let domIndex = pendingYangshipinDomIndex,
+              yangshipinWebView.url?.host?.contains("yangshipin.cn") == true else { return }
+        pendingYangshipinDomIndex = nil
+        diagnostics.log("session", "click yangshipin after unsuspend dom=\(domIndex)")
+        clickYangshipinChannel(domIndex: domIndex)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.yangshipinWebView.evaluateJavaScript("window.extractData()", completionHandler: nil)
         }
     }
 
@@ -830,13 +855,8 @@ extension WebViewModel: WKNavigationDelegate {
         injectScripts(for: .yangshipin, into: webView)
         if playbackMode != .yangshipin {
             suspend(yangshipinWebView)
-        }
-        if let domIndex = pendingYangshipinDomIndex {
-            clickYangshipinChannel(domIndex: domIndex)
-            pendingYangshipinDomIndex = nil
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-                self?.yangshipinWebView.evaluateJavaScript("window.extractData()", completionHandler: nil)
-            }
+        } else {
+            flushPendingYangshipinClick()
         }
     }
 
@@ -1054,25 +1074,6 @@ extension WebViewModel: WKScriptMessageHandler {
                     "overlay",
                     "restricted prompt \(present ? "visible" : "hidden") kind=\(kind) snippet=\(snippet) on \(source) frame=\(frame) href=\(href)"
                 )
-            case "vdn":
-                let host = data["host"] as? String ?? ""
-                let path = data["path"] as? String ?? ""
-                let pdrm = data["pdrm"] as? String ?? ""
-                let channel = data["channel"] as? String ?? ""
-                let play = data["play"] as? String ?? ""
-                let ack = data["ack"] as? String ?? ""
-                let parse = data["parse"] as? String ?? ""
-                let hasHlsNd = data["hasHlsNd"] as? Bool ?? false
-                let hasHlsCdrm = data["hasHlsCdrm"] as? Bool ?? false
-                let hasBackupNd = data["hasBackupNd"] as? Bool ?? false
-                let hasBackupCdrm = data["hasBackupCdrm"] as? Bool ?? false
-                let manifestKeys = data["manifestKeys"] as? String ?? ""
-                let tipKind = data["tipKind"] as? String ?? ""
-                let status = data["status"] as? Int ?? 0
-                self.diagnostics.log(
-                    "vdn",
-                    "\(source) frame=\(frame) host=\(host) path=\(path) status=\(status) pdrm=\(pdrm) channel=\(channel) parse=\(parse) ack=\(ack) play=\(play) hlsNd=\(hasHlsNd) hlsCdrm=\(hasHlsCdrm) backupNd=\(hasBackupNd) backupCdrm=\(hasBackupCdrm) tip=\(tipKind) keys=\(manifestKeys)"
-                )
             case "playerBranch":
                 let safari = data["safari"] as? Bool ?? false
                 let iosHttps = data["iosHttps"] as? Bool ?? false
@@ -1085,9 +1086,10 @@ extension WebViewModel: WKScriptMessageHandler {
                 let isIosDrmFlag = data["isIosDrmFlag"] as? Bool ?? false
                 let isIosDrmFn = data["isIosDrmFn"] as? String ?? ""
                 let videoUrlKind = data["videoUrlKind"] as? String ?? ""
+                let domSrcKind = data["domSrcKind"] as? String ?? ""
                 self.diagnostics.log(
                     "player",
-                    "\(source) frame=\(frame) safari=\(safari) iosHttps=\(iosHttps) iosVer=\(iosVer) wasm=\(wasm) mse=\(mse) eme=\(eme) jumpToApp=\(jumpToApp) isDrm=\(isDrm) isIosDrmFlag=\(isIosDrmFlag) isIosDrmFn=\(isIosDrmFn) videoUrlKind=\(videoUrlKind)"
+                    "\(source) frame=\(frame) safari=\(safari) iosHttps=\(iosHttps) iosVer=\(iosVer) wasm=\(wasm) mse=\(mse) eme=\(eme) jumpToApp=\(jumpToApp) isDrm=\(isDrm) isIosDrmFlag=\(isIosDrmFlag) isIosDrmFn=\(isIosDrmFn) videoUrlKind=\(videoUrlKind) domSrcKind=\(domSrcKind)"
                 )
             case "pageError":
                 let name = data["name"] as? String ?? "Error"
@@ -1097,7 +1099,12 @@ extension WebViewModel: WKScriptMessageHandler {
                 self.diagnostics.log("page", "error name=\(name) path=\(path) line=\(line):\(column) source=\(source)")
             case "unhandledRejection":
                 let name = data["name"] as? String ?? "unknown"
-                self.diagnostics.log("page", "unhandled rejection name=\(name) source=\(source)")
+                let message = data["message"] as? String ?? ""
+                let srcEmpty = data["srcEmpty"] as? Bool ?? false
+                self.diagnostics.log(
+                    "page",
+                    "unhandled rejection name=\(name) message=\(message) srcEmpty=\(srcEmpty) source=\(source)"
+                )
             default:
                 break
             }

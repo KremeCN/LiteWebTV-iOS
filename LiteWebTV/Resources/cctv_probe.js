@@ -10,6 +10,8 @@
     var registered = false;
     var pendingPosts = [];
     var lastBranchKey = '';
+    var attachedVideos = typeof WeakSet === 'function' ? new WeakSet() : null;
+    var attachedFallback = [];
     var MAX_PENDING = 30;
 
     function emit(type, data) {
@@ -48,6 +50,23 @@
         });
     }
 
+    function hasAttached(video) {
+        if (attachedVideos) return attachedVideos.has(video);
+        return attachedFallback.indexOf(video) !== -1;
+    }
+
+    function markAttached(video) {
+        if (attachedVideos) {
+            attachedVideos.add(video);
+            return;
+        }
+        attachedFallback.push(video);
+    }
+
+    function firstVideo() {
+        return document.querySelector('video');
+    }
+
     function safeSrc(video) {
         try {
             var raw = video.currentSrc || video.src || '';
@@ -76,12 +95,15 @@
     }
 
     function attachVideo(video) {
-        if (!video || video.getAttribute('data-lwtv-diag') === '1') return;
-        video.setAttribute('data-lwtv-diag', '1');
+        if (!video || hasAttached(video)) return;
+        markAttached(video);
         post('video', { event: 'found', video: describeVideo(video) });
-        ['loadedmetadata', 'playing', 'waiting', 'stalled', 'error', 'pause', 'emptied'].forEach(function (name) {
+        ['loadedmetadata', 'playing', 'waiting', 'stalled', 'error', 'pause', 'emptied', 'loadstart'].forEach(function (name) {
             video.addEventListener(name, function () {
                 post('video', { event: name, video: describeVideo(video) });
+                if (name === 'loadstart' || name === 'emptied' || name === 'error') {
+                    maybePostBranch(true);
+                }
             });
         });
         var lastBucket = -1;
@@ -113,14 +135,20 @@
     }
 
     function scanOverlay(force) {
-        var text = overlayText();
-        var jump = !!document.querySelector('[id^="jump_to_app_"]');
-        var present = /本时段节目请使用电脑(?:端|客户端)|央视影音客户端观看/.test(text) || jump;
-        var kind = jump ? 'jump-to-app' : classifyTip(text);
-        var snippet = '';
         var errorNode = document.querySelector('[id^="error_msg_"]');
+        var snippet = '';
         if (errorNode) {
             snippet = String(errorNode.innerText || errorNode.textContent || '').replace(/\s+/g, ' ').slice(0, 80);
+        }
+        var text = overlayText();
+        var jump = !!document.querySelector('[id^="jump_to_app_"]');
+        var present = /本时段节目请使用电脑(?:端|客户端)|央视影音客户端观看/.test(snippet || text) || jump;
+        var kind = jump ? 'jump-to-app' : classifyTip(snippet);
+        if (kind === 'none' || kind === 'other') {
+            if (/电脑端或央视影音/.test(text)) kind = 'use-pc-or-cbox';
+            else if (/本时段节目请使用电脑端观看/.test(text)) kind = 'use-pc';
+            else if (!present) kind = 'none';
+            else kind = 'other';
         }
         if (!force && overlayPresent === present && overlayKind === kind) return;
         overlayPresent = present;
@@ -145,6 +173,7 @@
         var objs = window.livePlayerObjs || {};
         var player = objs.player || {};
         var video = player.video || {};
+        var domVideo = firstVideo();
         var drmFn = '';
         try {
             if (typeof isIosDrmPlayer === 'function' && window.playerParas) {
@@ -164,7 +193,8 @@
             isDrm: !!player.isDrm,
             isIosDrmFlag: !!objs.isIosDrm,
             isIosDrmFn: drmFn,
-            videoUrlKind: classifyMediaUrl(video.url || video.liveUrl || '')
+            videoUrlKind: classifyMediaUrl(video.url || video.liveUrl || ''),
+            domSrcKind: classifyMediaUrl(domVideo ? (domVideo.currentSrc || domVideo.src || '') : '')
         };
     }
 
@@ -174,142 +204,6 @@
         if (!force && key === lastBranchKey) return;
         lastBranchKey = key;
         post('playerBranch', snapshot);
-    }
-
-    function isVdnUrl(url) {
-        return /vdn.*\.cntv\.cn|liveHtml5\.do|\/api\/v3\/vdn\//i.test(String(url || ''));
-    }
-
-    function describeVdnRequest(rawUrl) {
-        try {
-            var parsed = new URL(rawUrl, location.href);
-            var params = {};
-            ['pdrm', 'channel', 'tai', 'client', 'vn'].forEach(function (key) {
-                if (parsed.searchParams.has(key)) {
-                    params[key] = String(parsed.searchParams.get(key) || '');
-                }
-            });
-            return { host: parsed.host, path: parsed.pathname, params: params };
-        } catch (e) {
-            return { host: '', path: '', params: {} };
-        }
-    }
-
-    function describeVdnBody(text) {
-        var info = {
-            parse: 'empty',
-            ack: '',
-            play: '',
-            pub: '',
-            hasHlsNd: false,
-            hasHlsCdrm: false,
-            hasBackupNd: false,
-            hasBackupCdrm: false,
-            manifestKeys: '',
-            backupKeys: '',
-            tipKind: 'none'
-        };
-        if (!text) return info;
-        var start = text.indexOf('{');
-        var end = text.lastIndexOf('}');
-        if (start < 0 || end <= start) {
-            info.parse = 'nonjson';
-            return info;
-        }
-        var json;
-        try {
-            json = JSON.parse(text.slice(start, end + 1));
-        } catch (e) {
-            info.parse = 'invalid';
-            return info;
-        }
-        info.parse = 'ok';
-        info.ack = String(json.ack || '');
-        info.play = json.play === undefined ? 'missing' : String(json.play);
-        info.pub = json.public === undefined ? '' : String(json.public);
-        var manifest = json.manifest || {};
-        var backup = json.backup || {};
-        info.manifestKeys = Object.keys(manifest).sort().join(',');
-        info.backupKeys = Object.keys(backup).sort().join(',');
-        info.hasHlsNd = !!(manifest.hls_nd && String(manifest.hls_nd).length >= 4);
-        info.hasHlsCdrm = !!(manifest.hls_cdrm && String(manifest.hls_cdrm).length >= 4);
-        info.hasBackupNd = !!(backup.hls_nd && String(backup.hls_nd).length >= 4);
-        info.hasBackupCdrm = !!(backup.hls_cdrm && String(backup.hls_cdrm).length >= 4);
-        info.tipKind = classifyTip(String(json.tip_msg || ''));
-        return info;
-    }
-
-    function reportVdn(rawUrl, bodyText, status) {
-        var request = describeVdnRequest(rawUrl);
-        var response = describeVdnBody(bodyText);
-        post('vdn', {
-            host: request.host,
-            path: request.path,
-            pdrm: request.params.pdrm || '',
-            channel: request.params.channel || '',
-            tai: request.params.tai || '',
-            client: request.params.client || '',
-            vn: request.params.vn || '',
-            status: Number(status || 0),
-            parse: response.parse,
-            ack: response.ack,
-            play: response.play,
-            pub: response.pub,
-            hasHlsNd: response.hasHlsNd,
-            hasHlsCdrm: response.hasHlsCdrm,
-            hasBackupNd: response.hasBackupNd,
-            hasBackupCdrm: response.hasBackupCdrm,
-            manifestKeys: response.manifestKeys,
-            backupKeys: response.backupKeys,
-            tipKind: response.tipKind
-        });
-        maybePostBranch(true);
-        scanOverlay(true);
-    }
-
-    function installNetworkHooks() {
-        if (!isMainFrame || window.__lwtvVdnHooked) return;
-        window.__lwtvVdnHooked = true;
-        try {
-            var proto = XMLHttpRequest.prototype;
-            var originalOpen = proto.open;
-            var originalSend = proto.send;
-            proto.open = function (method, url) {
-                try { this.__lwtvUrl = String(url || ''); } catch (e) { }
-                return originalOpen.apply(this, arguments);
-            };
-            proto.send = function () {
-                try {
-                    this.addEventListener('loadend', function () {
-                        try {
-                            if (!isVdnUrl(this.__lwtvUrl)) return;
-                            reportVdn(this.__lwtvUrl, this.responseText, this.status);
-                        } catch (e) { }
-                    });
-                } catch (e) { }
-                return originalSend.apply(this, arguments);
-            };
-        } catch (e) { }
-        try {
-            if (typeof window.fetch === 'function') {
-                var originalFetch = window.fetch;
-                window.fetch = function (input) {
-                    var url = '';
-                    try {
-                        url = typeof input === 'string' ? input : String((input && input.url) || '');
-                    } catch (e) { }
-                    return originalFetch.apply(this, arguments).then(function (response) {
-                        try {
-                            if (!isVdnUrl(url || response.url)) return response;
-                            response.clone().text().then(function (text) {
-                                reportVdn(url || response.url, text, response.status);
-                            });
-                        } catch (e) { }
-                        return response;
-                    });
-                };
-            }
-        } catch (e) { }
     }
 
     function scan(forceOverlay) {
@@ -376,7 +270,14 @@
         });
     });
     window.addEventListener('unhandledrejection', function (event) {
-        post('unhandledRejection', { name: event.reason && event.reason.name ? String(event.reason.name) : '' });
+        var reason = event.reason;
+        var video = firstVideo();
+        post('unhandledRejection', {
+            name: reason && reason.name ? String(reason.name) : '',
+            message: reason && reason.message ? String(reason.message).slice(0, 80) : '',
+            srcEmpty: !!(video && !(video.currentSrc || video.src))
+        });
+        maybePostBranch(true);
     });
     window.addEventListener('pagehide', function (event) {
         post('documentClosed', { persisted: !!event.persisted });
@@ -388,7 +289,6 @@
         }
     });
 
-    installNetworkHooks();
     if (!isMainFrame) {
         registerDocument('subframe-initial');
     }
