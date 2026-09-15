@@ -78,26 +78,20 @@ struct ChannelListView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(channels.enumerated()), id: \.element.id) { offset, item in
-                        if let group = item.group, shouldShowGroupHeader(at: offset) {
-                            Text(group)
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundColor(Color(hex: "00A1D6"))
-                                .padding(.top, offset == 0 ? 0 : 12)
-                                .padding(.bottom, 8)
-                        }
-
-                        ChannelRow(
-                            item: item,
-                            onSelectChannel: {
-                                onSelect(offset)
-                            },
-                            onOpenSourceMenu: {
-                                withAnimation(.easeInOut(duration: 0.25)) {
-                                    sourceMenuIndex = offset
+                        if !item.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            ChannelRow(
+                                item: item,
+                                onSelectChannel: {
+                                    onSelect(offset)
+                                },
+                                onOpenSourceMenu: {
+                                    withAnimation(.easeInOut(duration: 0.25)) {
+                                        sourceMenuIndex = offset
+                                    }
                                 }
-                            }
-                        )
-                        .id(offset)
+                            )
+                            .id(offset)
+                        }
                     }
                 }
             }
@@ -126,12 +120,6 @@ struct ChannelListView: View {
                 }
             }
         }
-    }
-
-    private func shouldShowGroupHeader(at offset: Int) -> Bool {
-        guard let group = channels[offset].group else { return false }
-        if offset == 0 { return true }
-        return channels[offset - 1].group != group
     }
 }
 
