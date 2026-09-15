@@ -5,6 +5,8 @@
 
     var attached = false;
     var originalPlay = null;
+    var originalPause = null;
+    var recovering = false;
 
     function post(msg) {
         try {
@@ -60,51 +62,93 @@
     }
 
     function targetVideo() {
-        return document.querySelector('video[id^="h5player_"]') || document.querySelector('video');
+        var videos = document.querySelectorAll('video');
+        var best = null;
+        for (var i = 0; i < videos.length; i++) {
+            if (!hasMedia(videos[i])) continue;
+            if (!best || videos[i].videoWidth > best.videoWidth) best = videos[i];
+        }
+        return best || document.querySelector('video[id^="h5player_"]') || videos[0] || null;
+    }
+
+    function hasDecodedFrame(video) {
+        return !!(video && video.videoWidth > 1 && video.readyState >= 2);
+    }
+
+    function quietAutoplay(video) {
+        if (!video) return;
+        try {
+            video.autoplay = false;
+            video.removeAttribute('autoplay');
+            video.setAttribute('playsinline', '');
+            video.setAttribute('webkit-playsinline', '');
+            video.setAttribute('x5-playsinline', 'true');
+        } catch (e) { }
+    }
+
+    function hideFalseOverlay() {
+        document.querySelectorAll('[id^="error_msg_"]').forEach(function (el) {
+            el.style.setProperty('display', 'none', 'important');
+            el.style.setProperty('visibility', 'hidden', 'important');
+            el.style.setProperty('opacity', '0', 'important');
+            el.style.setProperty('pointer-events', 'none', 'important');
+        });
+    }
+
+    function revealIfDecoded() {
+        var video = targetVideo();
+        if (!hasDecodedFrame(video)) return false;
+        recovering = true;
+        hideFalseOverlay();
+        try {
+            video.style.setProperty('display', 'block', 'important');
+            video.style.setProperty('visibility', 'visible', 'important');
+            video.style.setProperty('opacity', '1', 'important');
+            video.style.setProperty('width', '100%', 'important');
+            video.style.setProperty('height', '100%', 'important');
+        } catch (e) { }
+        if (video.paused && originalPlay) {
+            try {
+                var playing = originalPlay.call(video);
+                if (playing && typeof playing.catch === 'function') playing.catch(function () { });
+            } catch (e) { }
+        }
+        if (!video.__lwtvRevealed) {
+            video.__lwtvRevealed = true;
+            post('native hls revealed ' + video.videoWidth + 'x' + video.videoHeight + ' paused=' + video.paused);
+        }
+        if (window.Android && window.Android.dismissSplash) {
+            window.Android.dismissSplash();
+        }
+        return true;
     }
 
     function bindReveal(video) {
         if (!video || video.__lwtvRevealBound) return;
         video.__lwtvRevealBound = true;
-        video.addEventListener('loadedmetadata', revealIfDecoded);
-        video.addEventListener('canplay', revealIfDecoded);
-        video.addEventListener('playing', revealIfDecoded);
-        video.addEventListener('resize', revealIfDecoded);
-    }
-
-    function revealIfDecoded() {
-        var video = targetVideo();
-        if (!video || video.videoWidth < 2) return;
-        video.style.setProperty('display', 'block', 'important');
-        document.querySelectorAll('[id^="error_msg_"]').forEach(function (el) {
-            el.style.setProperty('display', 'none', 'important');
+        ['loadedmetadata', 'loadeddata', 'canplay', 'playing', 'resize', 'timeupdate'].forEach(function (name) {
+            video.addEventListener(name, function () {
+                try { revealIfDecoded(); } catch (e) { }
+            });
         });
-        if (video.paused && originalPlay) {
-            var playing = originalPlay.call(video);
-            if (playing && typeof playing.catch === 'function') playing.catch(function () { });
-        }
-        if (!video.__lwtvRevealed) {
-            video.__lwtvRevealed = true;
-            post('native hls revealed ' + video.videoWidth + 'x' + video.videoHeight);
-        }
-        if (window.Android && window.Android.dismissSplash) {
-            window.Android.dismissSplash();
-        }
     }
 
     function attachSrc() {
         var url = playerUrl();
         var video = targetVideo();
+        if (!video) {
+            video = document.querySelector('video');
+        }
         if (!video) return false;
+        quietAutoplay(video);
+        bindReveal(video);
         if (hasMedia(video)) {
             attached = true;
-            bindReveal(video);
             return true;
         }
         if (!url) return false;
         try {
-            video.setAttribute('playsinline', '');
-            video.setAttribute('webkit-playsinline', '');
+            quietAutoplay(video);
             video.src = url;
             if (typeof video.load === 'function') video.load();
             attached = true;
@@ -124,11 +168,13 @@
     var proto = window.HTMLMediaElement && window.HTMLMediaElement.prototype;
     if (proto && !proto.__lwtvPlayWrapped) {
         originalPlay = proto.play;
+        originalPause = proto.pause;
         proto.play = function () {
             var self = this;
             var args = arguments;
+            quietAutoplay(self);
             attachSrc();
-            if (canStart(self)) {
+            if (canStart(self) || hasDecodedFrame(self)) {
                 return originalPlay.apply(self, args);
             }
             if (self.__lwtvPlayWait) return self.__lwtvPlayWait;
@@ -143,8 +189,12 @@
                 }
                 function tryStart() {
                     attachSrc();
-                    if (!canStart(self)) return false;
-                    finishOk(originalPlay.apply(self, args));
+                    if (!(canStart(self) || hasDecodedFrame(self))) return false;
+                    try {
+                        finishOk(originalPlay.apply(self, args));
+                    } catch (e) {
+                        return false;
+                    }
                     return true;
                 }
                 function onReady() {
@@ -165,14 +215,44 @@
             });
             return self.__lwtvPlayWait;
         };
+        proto.pause = function () {
+            if (recovering && hasDecodedFrame(this)) return;
+            return originalPause.apply(this, arguments);
+        };
         proto.__lwtvPlayWrapped = true;
     }
 
     function tick() {
-        attachSrc();
-        revealIfDecoded();
-        var decoded = targetVideo() && targetVideo().videoWidth > 1;
-        setTimeout(tick, decoded ? 1000 : 50);
+        try {
+            document.querySelectorAll('video').forEach(quietAutoplay);
+            attachSrc();
+            revealIfDecoded();
+        } catch (e) { }
+        var decoded = hasDecodedFrame(targetVideo());
+        setTimeout(tick, decoded ? 400 : 50);
     }
     tick();
+
+    try {
+        var scheduled = false;
+        function schedule() {
+            if (scheduled) return;
+            scheduled = true;
+            setTimeout(function () {
+                scheduled = false;
+                try {
+                    document.querySelectorAll('video').forEach(quietAutoplay);
+                    attachSrc();
+                    revealIfDecoded();
+                } catch (e) { }
+            }, 0);
+        }
+        var observer = new MutationObserver(schedule);
+        observer.observe(document.documentElement, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['style', 'class', 'autoplay', 'src']
+        });
+    } catch (e) { }
 })();
