@@ -1,17 +1,21 @@
 import Foundation
 import WebKit
 import Combine
+import UIKit
 
-/// 播放源模式（当前 WebView 实际加载的页面类型）
 enum PlaybackMode {
     case yangshipin
     case cctv
 }
 
+enum VisibleWebSurface {
+    case yangshipin
+    case cctv
+    case probe
+}
+
 /// WebView 核心 ViewModel
 final class WebViewModel: NSObject, ObservableObject {
-
-    // MARK: - Published State
 
     @Published var logicalChannels: [LogicalChannel] = []
     @Published var programs: [ProgramItem] = []
@@ -22,15 +26,15 @@ final class WebViewModel: NSObject, ObservableObject {
     @Published private(set) var playbackMode: PlaybackMode = SourceCapability.meetsMinimumOSVersion ? .yangshipin : .cctv
     @Published private(set) var yangshipinPlayable: Bool = SourceCapability.meetsMinimumOSVersion
     @Published var playbackError: String?
-
-    // MARK: - Constants
+    @Published var isCompareMode = false
+    @Published var probeUseSafariUA = true
+    @Published var probeAllowsInlinePlayback = true
+    @Published private(set) var probeRevision = 0
+    @Published var diagnostics = PlaybackDiagnostics()
 
     private let yangshipinURL = "https://www.yangshipin.cn/tv/home"
     private let pcUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    /// 央视网走 iPhone Safari UA：`isIPad()`（含 iphone）进 HTML5，`Safari/` 进 FairPlay。
-    /// WKWebView 默认串常没有 `Safari/`，所以 JS 里再锁一次 `userAgent` / `appVersion`。
-    /// 打开 `/m/` 页（页内直接 `createLivePlayer`）；桌面页没有这句调用。
-    /// 请求头 UA 不够：iPad 默认 `preferredContentMode = .desktop`，会出电脑横屏站。
+    /// 受控变量，不是“已证明等同 Safari”的结论。
     private let cctvUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1"
     private let beijingTimeZone = TimeZone(identifier: "Asia/Shanghai")!
 
@@ -38,54 +42,62 @@ final class WebViewModel: NSObject, ObservableObject {
     private var lastSwitchTime: Date = .distantPast
     private var switchStartTime: Date = .distantPast
     private var scheduleTicker: AnyCancellable?
+    private var cancellables = Set<AnyCancellable>()
 
     private var activeCctvSlug: String?
     private var pendingYangshipinDomIndex: Int?
-    private var cctvURLOptions: [URL] = []
-    private var cctvURLIndex = 0
     private var yangshipinBootstrapInProgress = false
     private var yangshipinBootstrapTimeoutTask: DispatchWorkItem?
     private var hasAppliedLaunchChannel = false
-
     private let yangshipinBootstrapTimeout: TimeInterval = 15.0
+    private var mediaGeneration = 0
+    private var probeSessionID = 0
+    private var probeOperationGeneration = 0
+    private var activeDiagnosticDocuments: [ObjectIdentifier: Set<String>] = [:]
+    private var activeDiagnosticNavigationIDs: [ObjectIdentifier: String] = [:]
+    private struct PendingPlaybackOperation {
+        let attempt: Int
+        let source: String
+        let webViewID: ObjectIdentifier
+        let navigationID: String?
+    }
+    private var pendingPlaybackOperations: [String: PendingPlaybackOperation] = [:]
+    private var contentRuleList: WKContentRuleList?
 
-    // MARK: - WebView
-
-    /// 央视频：PC 页 + 页内 MSE，必须 `allowsInlineMediaPlayback = true`。
     private(set) var yangshipinWebView: WKWebView!
-    /// 央视网：手机页 + 系统播放器。配置在创建时冻结，必须单独一只 WebView。
-    /// Safari iPhone 默认不允许页内播放，直播会进 AVPlayer；我们以前把视频钉在 WKWebView 里，FairPlay 过不去。
     private(set) var cctvWebView: WKWebView!
+    private(set) var probeWebView: WKWebView!
 
-    var webView: WKWebView {
-        playbackMode == .cctv ? cctvWebView : yangshipinWebView
+    var visibleSurface: VisibleWebSurface {
+        if isCompareMode { return .probe }
+        return playbackMode == .cctv ? .cctv : .yangshipin
     }
 
-    // MARK: - Script Content Cache
-
-    private var bridgeShimScript: String = ""
-    private var automationScript: String = ""
-    private var cctvAutomationScript: String = ""
-
-    // MARK: - Init
+    private var bridgeShimScript = ""
+    private var automationScript = ""
+    private var cctvAutomationScript = ""
+    private var cctvProbeScript = ""
 
     override init() {
         super.init()
         loadScripts()
-        configureWebView()
+        configureWebViews()
+        diagnostics.beginSession("app launch build=\(PlaybackDiagnostics.buildID)")
+        diagnostics.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
         startPlaybackRouting()
         startScheduleTicker()
     }
 
     deinit {
         scheduleTicker?.cancel()
-        yangshipinWebView?.configuration.userContentController.removeScriptMessageHandler(forName: "bridge")
-        cctvWebView?.configuration.userContentController.removeScriptMessageHandler(forName: "bridge")
+        [yangshipinWebView, cctvWebView, probeWebView].forEach { webView in
+            webView?.configuration.userContentController.removeScriptMessageHandler(forName: "bridge")
+            webView?.configuration.userContentController.removeScriptMessageHandler(forName: "diag")
+        }
     }
 
-    // MARK: - Public Helpers
-
-    /// 为指定频道选择播放源。若频道或源发生变化则重新加载并返回 `true`。
     @discardableResult
     func selectSource(_ source: StreamSource, at listIndex: Int) -> Bool {
         guard listIndex >= 0, listIndex < logicalChannels.count else { return false }
@@ -102,137 +114,191 @@ final class WebViewModel: NSObject, ObservableObject {
         return true
     }
 
-    // MARK: - Script Loading
+    func enterOfficialCompare() {
+        guard let slug = activeCctvSlug ?? launchCctvSlug() ?? logicalChannels[safe: currentChannelIndex]?.cctvSlug else {
+            diagnostics.log("error", "no CCTV slug for compare mode")
+            playbackError = "当前频道没有央视网对照地址"
+            return
+        }
+        probeOperationGeneration += 1
+        let operation = probeOperationGeneration
+        probeSessionID += 1
+        let session = probeSessionID
+        diagnostics.beginAttempt(
+            "official compare inline=\(probeAllowsInlinePlayback) safariUA=\(probeUseSafariUA) slug=\(slug) session=\(session)"
+        )
+        let url = CCTVCatalog.pageURLs(for: slug)[0]
+        rebuildProbeWebView(operation: operation) { [weak self] webView in
+            guard let self, operation == self.probeOperationGeneration else { return }
+            self.isCompareMode = true
+            self.diagnostics.log(
+                "nav",
+                "probe prepared \(self.diagnostics.redactURLString(url.absoluteString)) session=\(session)"
+            )
+            self.activate(webView) { [weak self, weak webView] in
+                guard let self, let webView,
+                      operation == self.probeOperationGeneration,
+                      webView === self.probeWebView else { return }
+                self.diagnostics.log("nav", "probe load after activation session=\(session)")
+                webView.load(URLRequest(url: url))
+            }
+        }
+    }
+
+    func exitOfficialCompare() {
+        probeOperationGeneration += 1
+        diagnostics.log("session", "exit official compare")
+        isCompareMode = false
+        probeWebView.stopLoading()
+        activateCurrentNormalWebView()
+    }
+
+    func noteProbeConfigurationChanged() {
+        diagnostics.log(
+            "probe",
+            "config changed inline=\(probeAllowsInlinePlayback) safariUA=\(probeUseSafariUA); tap 官方页面对照 to apply"
+        )
+    }
+
+    func copyDiagnostics() {
+        diagnostics.copyToPasteboard()
+    }
+
+    func shareDiagnostics() {
+        let text = diagnostics.exportedText()
+        let activity = UIActivityViewController(activityItems: [text], applicationActivities: nil)
+        guard let root = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .flatMap(\.windows)
+            .first(where: { $0.isKeyWindow })?
+            .rootViewController else { return }
+        var presenter = root
+        while let next = presenter.presentedViewController {
+            presenter = next
+        }
+        if let popover = activity.popoverPresentationController {
+            popover.sourceView = presenter.view
+            popover.sourceRect = CGRect(x: presenter.view.bounds.midX, y: 48, width: 8, height: 8)
+            popover.permittedArrowDirections = []
+        }
+        presenter.present(activity, animated: true)
+    }
 
     private func loadScripts() {
-        if let shimURL = Bundle.main.url(forResource: "bridge_shim", withExtension: "js"),
-           let shimContent = try? String(contentsOf: shimURL, encoding: .utf8) {
-            bridgeShimScript = shimContent
+        if let url = Bundle.main.url(forResource: "bridge_shim", withExtension: "js"),
+           let content = try? String(contentsOf: url, encoding: .utf8) {
+            bridgeShimScript = content
         }
-
-        if let autoURL = Bundle.main.url(forResource: "automation", withExtension: "js"),
-           let autoContent = try? String(contentsOf: autoURL, encoding: .utf8) {
-            automationScript = autoContent
+        if let url = Bundle.main.url(forResource: "automation", withExtension: "js"),
+           let content = try? String(contentsOf: url, encoding: .utf8) {
+            automationScript = content
         }
-
-        if let cctvURL = Bundle.main.url(forResource: "cctv_automation", withExtension: "js"),
-           let cctvContent = try? String(contentsOf: cctvURL, encoding: .utf8) {
-            cctvAutomationScript = cctvContent
+        if let url = Bundle.main.url(forResource: "cctv_automation", withExtension: "js"),
+           let content = try? String(contentsOf: url, encoding: .utf8) {
+            cctvAutomationScript = content
+        }
+        if let url = Bundle.main.url(forResource: "cctv_probe", withExtension: "js"),
+           let content = try? String(contentsOf: url, encoding: .utf8) {
+            cctvProbeScript = content
         }
     }
 
-    // MARK: - WebView Configuration
-
-    private func configureWebView() {
+    private func configureWebViews() {
         yangshipinWebView = makeWebView(kind: .yangshipin)
         cctvWebView = makeWebView(kind: .cctv)
+        probeWebView = makeWebView(kind: .probe)
         yangshipinWebView.customUserAgent = pcUserAgent
         cctvWebView.customUserAgent = cctvUserAgent
-        installContentRules()
+        installYangshipinContentRules()
+        suspend(yangshipinWebView)
+        suspend(cctvWebView)
+        suspend(probeWebView)
     }
 
-    private func makeWebView(kind: PlaybackMode) -> WKWebView {
+    private enum WebKind {
+        case yangshipin, cctv, probe
+    }
+
+    private func makeWebView(kind: WebKind) -> WKWebView {
         let config = WKWebViewConfiguration()
-        let contentController = WKUserContentController()
-        contentController.add(self, name: "bridge")
-        let startScript = kind == .cctv ? cctvSafariUAScript : yangshipinPlaybackGateScript
-        contentController.addUserScript(
-            WKUserScript(
-                source: startScript,
-                injectionTime: .atDocumentStart,
-                forMainFrameOnly: false
+        let controller = WKUserContentController()
+        controller.add(self, name: "bridge")
+        controller.add(self, name: "diag")
+        if kind == .cctv || kind == .probe {
+            if kind == .probe {
+                controller.addUserScript(
+                    WKUserScript(
+                        source: "window.__lwtvProbeSession=\(probeSessionID);",
+                        injectionTime: .atDocumentStart,
+                        forMainFrameOnly: false
+                    )
+                )
+            }
+            controller.addUserScript(
+                WKUserScript(source: cctvProbeScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
             )
-        )
-        config.userContentController = contentController
+        }
+        config.userContentController = controller
         config.mediaTypesRequiringUserActionForPlayback = []
-        // FairPlay 要挂在页内 video 上；关掉页内播放会让 liveplayer 走「请使用电脑端」。
-        config.allowsInlineMediaPlayback = true
-        config.defaultWebpagePreferences.preferredContentMode = (kind == .cctv) ? .mobile : .desktop
+        config.allowsInlineMediaPlayback = kind == .probe ? probeAllowsInlinePlayback : true
+        config.defaultWebpagePreferences.preferredContentMode = kind == .yangshipin ? .desktop : .mobile
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
         webView.allowsBackForwardNavigationGestures = false
-        webView.scrollView.isScrollEnabled = false
+        webView.scrollView.isScrollEnabled = kind == .probe
+        webView.scrollView.bounces = kind == .probe
         webView.isOpaque = true
         webView.backgroundColor = .black
         webView.scrollView.backgroundColor = .black
+        if kind == .probe {
+            webView.customUserAgent = probeUseSafariUA ? cctvUserAgent : nil
+        }
         return webView
     }
 
-    /// 央视网文档开始：锁在 `Navigator.prototype` 上。只改 `navigator` 实例时，
-    /// iOS 26 WKWebView 仍可能读到没有 `Safari/` 的串，`isIosDrmPlayer()` 就会弹「请使用电脑端」。
-    private var cctvSafariUAScript: String {
-        let ua = cctvUserAgent
-        return """
-        (function() {
-            var ua = '\(ua)';
-            var app = ua.indexOf('Mozilla/') === 0 ? ua.slice(8) : ua;
-            function lockNav(key, value) {
-                var cap = {
-                    configurable: true,
-                    enumerable: true,
-                    get: function () { return value; }
-                };
-                try { Object.defineProperty(navigator, key, cap); } catch (e) {}
-                try { Object.defineProperty(Navigator.prototype, key, cap); } catch (e) {}
+    private func rebuildProbeWebView(
+        operation: Int,
+        completion: @escaping (WKWebView) -> Void
+    ) {
+        let oldProbe = probeWebView
+        oldProbe?.stopLoading()
+        let finishOldCleanup: () -> Void = { [weak self, weak oldProbe] in
+            guard let self else { return }
+            oldProbe?.configuration.userContentController.removeScriptMessageHandler(forName: "bridge")
+            oldProbe?.configuration.userContentController.removeScriptMessageHandler(forName: "diag")
+            if let oldProbe {
+                self.activeDiagnosticDocuments.removeValue(forKey: ObjectIdentifier(oldProbe))
+                oldProbe.removeFromSuperview()
             }
-            lockNav('userAgent', ua);
-            lockNav('appVersion', app);
-            lockNav('vendor', 'Apple Computer, Inc.');
-            try {
-                if (typeof window.safari === 'undefined') {
-                    window.safari = {
-                        pushNotification: {
-                            toString: function () { return '[object SafariRemoteNotification]'; }
-                        }
-                    };
-                }
-            } catch (e) {}
+            guard operation == self.probeOperationGeneration else { return }
 
-            var realCreate = null;
-            function wrappedCreate(paras) {
-                if (paras && typeof paras === 'object') {
-                    paras.jumpToApp = 'false';
+            let newProbe = self.makeWebView(kind: .probe)
+            self.suspend(newProbe, label: "probe-new") { [weak self] in
+                guard let self else { return }
+                guard operation == self.probeOperationGeneration else {
+                    newProbe.stopLoading()
+                    newProbe.configuration.userContentController.removeScriptMessageHandler(forName: "bridge")
+                    newProbe.configuration.userContentController.removeScriptMessageHandler(forName: "diag")
+                    return
                 }
-                if (typeof realCreate === 'function') {
-                    return realCreate.apply(this, arguments);
-                }
+                self.probeWebView = newProbe
+                self.probeRevision += 1
+                completion(newProbe)
             }
-            try {
-                Object.defineProperty(window, 'createLivePlayer', {
-                    configurable: true,
-                    enumerable: true,
-                    get: function () { return wrappedCreate; },
-                    set: function (fn) { realCreate = fn; }
-                });
-            } catch (e) {}
-        })();
-        """
+        }
+        if let oldProbe {
+            suspend(oldProbe, label: "probe-old", completion: finishOldCleanup)
+        } else {
+            finishOldCleanup()
+        }
     }
-
-    /// 后台央视频在刮频道表时不能出声。新文档会重置这个开关。
-    private var yangshipinPlaybackGateScript: String {
-        """
-        (function() {
-            window.__lwtvAllowPlay = false;
-            var orig = HTMLMediaElement.prototype.play;
-            HTMLMediaElement.prototype.play = function () {
-                if (!window.__lwtvAllowPlay) {
-                    try { this.pause(); this.muted = true; } catch (e) {}
-                    return Promise.resolve();
-                }
-                return orig.apply(this, arguments);
-            };
-        })();
-        """
-    }
-
-    // MARK: - Playback Routing
 
     private func startPlaybackRouting() {
         SourceCapability.probeMediaSourceSupport(in: yangshipinWebView) { [weak self] supported in
-            guard let self = self else { return }
+            guard let self else { return }
             self.yangshipinPlayable = supported
+            self.diagnostics.log("capability", "yangshipin MSE class \(supported)")
             if supported {
                 self.enterYangshipinCapabilityMode()
             } else {
@@ -243,17 +309,22 @@ final class WebViewModel: NSObject, ObservableObject {
 
     private func enterYangshipinCapabilityMode() {
         if shouldRestoreCctvOnLaunch() {
-            setYangshipinPlaybackAllowed(false)
             playbackMode = .cctv
             if let slug = launchCctvSlug() {
+                diagnostics.log("session", "launch restore CCTV \(slug)")
                 loadCctvPage(for: slug)
             }
         } else {
-            setYangshipinPlaybackAllowed(true)
             playbackMode = .yangshipin
+            diagnostics.log("session", "launch yangshipin")
         }
         beginYangshipinBootstrap()
         loadYangshipinHome()
+        if playbackMode == .yangshipin {
+            activate(yangshipinWebView)
+        } else {
+            activate(cctvWebView)
+        }
     }
 
     private func shouldRestoreCctvOnLaunch() -> Bool {
@@ -267,23 +338,11 @@ final class WebViewModel: NSObject, ObservableObject {
         return id
     }
 
-    private func setYangshipinPlaybackAllowed(_ allowed: Bool) {
-        yangshipinWebView.evaluateJavaScript(
-            "window.__lwtvAllowPlay = \(allowed ? "true" : "false");",
-            completionHandler: nil
-        )
-        if !allowed {
-            pauseMedia(in: yangshipinWebView)
-        }
-    }
-
     private func enterCctvOnlyMode(startIndex: Int, markYangshipinUnavailable: Bool = true) {
         cancelYangshipinBootstrap()
         if markYangshipinUnavailable {
             yangshipinPlayable = false
         }
-        pauseMedia(in: yangshipinWebView)
-        setYangshipinPlaybackAllowed(false)
         playbackMode = .cctv
         currentChannelIndex = min(max(startIndex, 0), CCTVCatalog.channels.count - 1)
         logicalChannels = ChannelMerger.cctvOnlyChannels(activeIndex: currentChannelIndex)
@@ -296,7 +355,7 @@ final class WebViewModel: NSObject, ObservableObject {
         let task = DispatchWorkItem { [weak self] in
             guard let self, self.yangshipinBootstrapInProgress else { return }
             if self.logicalChannels.isEmpty {
-                print("[LiteWebTV] Yangshipin bootstrap timed out, falling back to CCTV")
+                self.diagnostics.log("session", "yangshipin bootstrap timed out")
                 self.enterCctvOnlyMode(startIndex: 0, markYangshipinUnavailable: false)
             }
         }
@@ -308,6 +367,9 @@ final class WebViewModel: NSObject, ObservableObject {
         yangshipinBootstrapInProgress = false
         yangshipinBootstrapTimeoutTask?.cancel()
         yangshipinBootstrapTimeoutTask = nil
+        if playbackMode == .cctv {
+            suspend(yangshipinWebView)
+        }
     }
 
     private func cancelYangshipinBootstrap() {
@@ -321,15 +383,84 @@ final class WebViewModel: NSObject, ObservableObject {
         yangshipinWebView.load(URLRequest(url: url))
     }
 
-    private func pauseMedia(in target: WKWebView) {
-        target.evaluateJavaScript(
-            "document.querySelectorAll('video,audio').forEach(function(m){ try { m.pause(); } catch(e) {} });",
-            completionHandler: nil
-        )
+    private func suspend(_ webView: WKWebView, label: String, completion: @escaping () -> Void) {
+        webView.requestMediaPlaybackState { [weak self] state in
+            self?.diagnostics.log("media", "state before suspend \(label) raw=\(state.rawValue)")
+        }
+        webView.setAllMediaPlaybackSuspended(true) { [weak self] in
+            webView.closeAllMediaPresentations {
+                self?.diagnostics.log("media", "suspended \(label)")
+                completion()
+            }
+        }
+    }
+
+    private func suspend(_ webView: WKWebView) {
+        suspend(webView, label: describe(webView), completion: {})
+    }
+
+    private func suspendAllExcept(_ active: WKWebView, completion: @escaping () -> Void) {
+        let others = [yangshipinWebView, cctvWebView, probeWebView].filter { $0 !== active }
+        guard !others.isEmpty else {
+            completion()
+            return
+        }
+        var remaining = others.count
+        for webView in others {
+            suspend(webView, label: describe(webView)) {
+                remaining -= 1
+                if remaining == 0 {
+                    completion()
+                }
+            }
+        }
+    }
+
+    private func activate(_ webView: WKWebView, completion: @escaping () -> Void = {}) {
+        mediaGeneration += 1
+        let generation = mediaGeneration
+        let label = describe(webView)
+        diagnostics.log("media", "activate requested \(label) gen=\(generation)")
+        suspendAllExcept(webView) { [weak self] in
+            guard let self else { return }
+            guard generation == self.mediaGeneration else {
+                self.diagnostics.log("media", "activate aborted stale gen=\(generation)")
+                return
+            }
+            webView.setAllMediaPlaybackSuspended(false) { [weak self] in
+                guard let self else { return }
+                guard generation == self.mediaGeneration else { return }
+                webView.requestMediaPlaybackState { state in
+                    guard generation == self.mediaGeneration else { return }
+                    self.diagnostics.log("media", "activated \(label) gen=\(generation) state=\(state.rawValue)")
+                    completion()
+                }
+            }
+        }
+    }
+
+    private func activateCurrentNormalWebView() {
+        if playbackMode == .cctv {
+            activate(cctvWebView)
+        } else {
+            activate(yangshipinWebView)
+        }
+    }
+
+    private func describe(_ webView: WKWebView) -> String {
+        if webView === yangshipinWebView { return "yangshipin" }
+        if webView === cctvWebView { return "cctv" }
+        if webView === probeWebView { return "probe" }
+        return "unknown"
     }
 
     private func applyLogicalChannel(at index: Int) {
         guard index >= 0, index < logicalChannels.count else { return }
+        if isCompareMode {
+            exitOfficialCompare()
+        } else {
+            probeOperationGeneration += 1
+        }
 
         currentChannelIndex = index
         updateActiveChannelHighlight()
@@ -341,19 +472,20 @@ final class WebViewModel: NSObject, ObservableObject {
         switch channel.selectedSource {
         case .cctv:
             guard let slug = channel.cctvSlug else { return }
-            setYangshipinPlaybackAllowed(false)
             playbackMode = .cctv
             pendingYangshipinDomIndex = nil
+            diagnostics.log("session", "switch CCTV \(slug)")
             loadCctvPage(for: slug)
+            activate(cctvWebView)
         case .yangshipin:
             guard let domIndex = channel.yangshipinDomIndex else { return }
-            pauseMedia(in: cctvWebView)
             playbackMode = .yangshipin
-            setYangshipinPlaybackAllowed(true)
             activeCctvSlug = nil
             programs = []
             currentProgramIndex = 0
+            diagnostics.log("session", "switch yangshipin dom=\(domIndex)")
             loadYangshipinChannel(domIndex: domIndex)
+            activate(yangshipinWebView)
         }
     }
 
@@ -372,31 +504,10 @@ final class WebViewModel: NSObject, ObservableObject {
 
     private func loadCctvPage(for slug: String) {
         activeCctvSlug = slug
-        cctvURLOptions = CCTVCatalog.pageURLs(for: slug)
-        cctvURLIndex = 0
-        loadCurrentCctvURL()
-        fetchEpg(for: slug)
-    }
-
-    private func loadCurrentCctvURL() {
-        guard cctvURLIndex < cctvURLOptions.count else {
-            playbackError = "该频道暂时无法播放"
-            shouldDismissSplash = true
-            return
-        }
-        let url = cctvURLOptions[cctvURLIndex]
-        print("[LiteWebTV] CCTV load \(url.absoluteString)")
+        guard let url = CCTVCatalog.pageURLs(for: slug).first else { return }
+        diagnostics.log("nav", "cctv load \(diagnostics.redactURLString(url.absoluteString))")
         cctvWebView.load(URLRequest(url: url))
-    }
-
-    private func retryNextCctvURL() {
-        cctvURLIndex += 1
-        if cctvURLIndex < cctvURLOptions.count {
-            loadCurrentCctvURL()
-        } else {
-            playbackError = "该频道暂时无法播放"
-            shouldDismissSplash = true
-        }
+        fetchEpg(for: slug)
     }
 
     private func updateActiveChannelHighlight() {
@@ -455,55 +566,26 @@ final class WebViewModel: NSObject, ObservableObject {
         updateActiveChannelHighlight()
     }
 
-    // MARK: - Content Rules
-
-    private func installContentRules() {
+    private func installYangshipinContentRules() {
         let rules: [[String: Any]] = [
             ["trigger": ["url-filter": ".*\\.woff2"], "action": ["type": "block"]],
             ["trigger": ["url-filter": ".*\\.woff"], "action": ["type": "block"]],
             ["trigger": ["url-filter": ".*\\.ttf"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*\\.otf"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*\\.eot"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*/fonts/"], "action": ["type": "block"]],
             ["trigger": ["url-filter": "hm\\.baidu\\.com"], "action": ["type": "block"]],
             ["trigger": ["url-filter": "tongji\\.baidu\\.com"], "action": ["type": "block"]],
             ["trigger": ["url-filter": "google-analytics"], "action": ["type": "block"]],
             ["trigger": ["url-filter": "googletagmanager"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": "s\\.cnzz\\.com"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": "umeng\\.com"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*/beacon"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*/trace"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*/report"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*/monitor"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*/tracking"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*/analytics"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*/tongji"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": ".*/datacenter"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": "openapi-trace"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": "tracing"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": "sentry"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": "bugly"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": "hotfix"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": "crash"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": "ad\\.doubleclick"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": "pagead"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": "adservice"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": "adsense"], "action": ["type": "block"]],
-            ["trigger": ["url-filter": "adsbygoogle"], "action": ["type": "block"]],
         ]
-
         guard let jsonData = try? JSONSerialization.data(withJSONObject: rules),
               let jsonString = String(data: jsonData, encoding: .utf8) else { return }
-
         WKContentRuleListStore.default().compileContentRuleList(
-            forIdentifier: "LiteWebTVBlockList",
+            forIdentifier: "LiteWebTVYangshipinBlockList",
             encodedContentRuleList: jsonString
         ) { [weak self] ruleList, _ in
-            if let ruleList = ruleList {
-                DispatchQueue.main.async {
-                    self?.yangshipinWebView.configuration.userContentController.add(ruleList)
-                    self?.cctvWebView.configuration.userContentController.add(ruleList)
-                }
+            guard let self, let ruleList else { return }
+            DispatchQueue.main.async {
+                self.contentRuleList = ruleList
+                self.yangshipinWebView.configuration.userContentController.add(ruleList)
             }
         }
     }
@@ -512,7 +594,7 @@ final class WebViewModel: NSObject, ObservableObject {
         scheduleTicker = Timer.publish(every: 30, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
-                guard let self = self else { return }
+                guard let self else { return }
                 if self.playbackMode == .cctv, let slug = self.activeCctvSlug {
                     self.fetchEpg(for: slug)
                 } else if self.playbackMode == .yangshipin {
@@ -521,20 +603,13 @@ final class WebViewModel: NSObject, ObservableObject {
             }
     }
 
-    // MARK: - EPG (CCTV)
-
     private func fetchEpg(for slug: String) {
         guard let url = CCTVCatalog.epgURL(for: slug) else { return }
-
         URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
-            guard let self = self, let data = data, error == nil else { return }
-
+            guard let self, let data, error == nil else { return }
             guard let response = try? JSONDecoder().decode(CCTVEPGResponse.self, from: data),
                   let channel = response.data?[slug],
-                  let entries = channel.list else {
-                return
-            }
-
+                  let entries = channel.list else { return }
             DispatchQueue.main.async {
                 guard self.playbackMode == .cctv, self.activeCctvSlug == slug else { return }
                 self.applyEpgEntries(entries, liveTitle: channel.isLive)
@@ -551,34 +626,23 @@ final class WebViewModel: NSObject, ObservableObject {
         let now = Int(Date().timeIntervalSince1970)
         var list: [ProgramItem] = []
         var activeIndex = 0
-
         for (index, entry) in entries.enumerated() {
             let isCurrent = entry.startTime <= now && now < entry.endTime
             list.append(ProgramItem(time: entry.showTime, title: entry.title, isCurrent: isCurrent))
-            if isCurrent {
-                activeIndex = index
-            }
+            if isCurrent { activeIndex = index }
         }
-
         if list.isEmpty {
             programs = []
             currentProgramIndex = 0
-            if let liveTitle, !liveTitle.isEmpty {
-                setCurrentTitle(liveTitle)
-            }
+            if let liveTitle, !liveTitle.isEmpty { setCurrentTitle(liveTitle) }
             return
         }
-
         if activeIndex == 0, list.first?.isCurrent == false {
             activeIndex = entries.indices.last { entries[$0].startTime <= now } ?? 0
-            for idx in list.indices {
-                list[idx].isCurrent = idx == activeIndex
-            }
+            for idx in list.indices { list[idx].isCurrent = idx == activeIndex }
         }
-
         programs = list
         currentProgramIndex = activeIndex
-
         if activeIndex < list.count {
             setCurrentTitle(list[activeIndex].title)
         } else if let liveTitle, !liveTitle.isEmpty {
@@ -586,68 +650,44 @@ final class WebViewModel: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - Script Injection
-
-    private func injectScripts(for mode: PlaybackMode, into target: WKWebView? = nil) {
+    private func injectScripts(for mode: PlaybackMode, into target: WKWebView) {
         let consoleBridge = """
         (function() {
-            var oldLog = console.log;
-            var oldWarn = console.warn;
-            var oldError = console.error;
-            console.log = function() {
-                oldLog.apply(console, arguments);
-                var msg = Array.from(arguments).map(String).join(' ');
-                window.webkit.messageHandlers.bridge.postMessage({type: 'console', level: 'log', data: msg});
-            };
-            console.warn = function() {
-                oldWarn.apply(console, arguments);
-                var msg = Array.from(arguments).map(String).join(' ');
-                window.webkit.messageHandlers.bridge.postMessage({type: 'console', level: 'warn', data: msg});
-            };
-            console.error = function() {
-                oldError.apply(console, arguments);
-                var msg = Array.from(arguments).map(String).join(' ');
-                window.webkit.messageHandlers.bridge.postMessage({type: 'console', level: 'error', data: msg});
-            };
+            var oldLog = console.log, oldWarn = console.warn, oldError = console.error;
+            function send(level, args) {
+                var msg = Array.from(args).map(String).join(' ');
+                window.webkit.messageHandlers.bridge.postMessage({type:'console', level:level, data:msg});
+            }
+            console.log = function() { oldLog.apply(console, arguments); send('log', arguments); };
+            console.warn = function() { oldWarn.apply(console, arguments); send('warn', arguments); };
+            console.error = function() { oldError.apply(console, arguments); send('error', arguments); };
         })();
         """
-
-        let platformSpoof = """
-        Object.defineProperty(navigator, 'platform', { get: function() { return 'Win32'; } });
-        """
-
-        let automation = mode == .cctv ? cctvAutomationScript : automationScript
-        let combinedScript: String
+        let combined: String
         if mode == .cctv {
-            combinedScript = consoleBridge + "\n" + bridgeShimScript + "\n" + automation
+            combined = consoleBridge + "\n" + bridgeShimScript + "\n" + cctvAutomationScript
         } else {
-            let allowPlay = playbackMode == .yangshipin
-            combinedScript = "window.__lwtvAllowPlay = \(allowPlay);\n"
-                + consoleBridge + "\n" + platformSpoof + "\n" + bridgeShimScript + "\n" + automation
+            let platformSpoof = "Object.defineProperty(navigator, 'platform', { get: function() { return 'Win32'; } });"
+            combined = consoleBridge + "\n" + platformSpoof + "\n" + bridgeShimScript + "\n" + automationScript
         }
-
-        (target ?? webView).evaluateJavaScript(combinedScript) { _, error in
-            if let error = error {
-                print("[LiteWebTV] Script injection error: \(error.localizedDescription)")
+        target.evaluateJavaScript(combined) { _, error in
+            if let error {
+                let nsError = error as NSError
+                self.diagnostics.log("inject", "failed domain=\(nsError.domain) code=\(nsError.code)")
             }
         }
     }
 
-    // MARK: - Channel Switching
-
     func quickSwitchChannel(isNext: Bool) -> (allowed: Bool, channelName: String?) {
         guard !logicalChannels.isEmpty else { return (false, nil) }
-
         let now = Date()
         if now.timeIntervalSince(lastSwitchTime) < switchDelay {
             return (false, nil)
         }
         lastSwitchTime = now
-
         var targetListIndex = isNext ? currentChannelIndex + 1 : currentChannelIndex - 1
         if targetListIndex >= logicalChannels.count { targetListIndex = 0 }
         if targetListIndex < 0 { targetListIndex = logicalChannels.count - 1 }
-
         let targetName = logicalChannels[targetListIndex].name
         applyLogicalChannel(at: targetListIndex)
         return (true, targetName)
@@ -664,36 +704,82 @@ final class WebViewModel: NSObject, ObservableObject {
         let js = """
         (function() {
             const items = document.querySelectorAll('.tv-main-con-r-list-left .oveerflow-1');
-            if(items[\(domIndex)]) {
-                items[\(domIndex)].click();
-            }
+            if(items[\(domIndex)]) { items[\(domIndex)].click(); }
         })();
         """
         yangshipinWebView.evaluateJavaScript(js, completionHandler: nil)
     }
 
     func togglePlayPause() {
+        let target = isCompareMode ? probeWebView : (playbackMode == .cctv ? cctvWebView : yangshipinWebView)
+        let operationID = UUID().uuidString
+        let targetID = ObjectIdentifier(target)
+        let operation = PendingPlaybackOperation(
+            attempt: diagnostics.currentAttempt,
+            source: describe(target),
+            webViewID: targetID,
+            navigationID: activeDiagnosticNavigationIDs[targetID]
+        )
+        pendingPlaybackOperations[operationID] = operation
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+            guard let self,
+                  let expired = self.pendingPlaybackOperations.removeValue(forKey: operationID) else { return }
+            self.diagnostics.log(
+                "play",
+                "app id=\(operationID) source=\(expired.source) result=timeout",
+                attempt: expired.attempt
+            )
+        }
         let js = """
         (function(){
+            var operationID = '\(operationID)';
+            var bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridge;
+            function report(action, result, errorName) {
+                if (bridge) bridge.postMessage({
+                    type: 'appPlaybackResult',
+                    action: action,
+                    result: result,
+                    errorName: errorName || '',
+                    operationID: operationID
+                });
+            }
             var video = document.querySelector('video');
-            if(video){
-                if(video.paused){ video.play(); }
-                else { video.pause(); }
+            if (!video) {
+                report('toggle', 'no-video', '');
+                return;
+            }
+            if (!video.paused) {
+                video.pause();
+                report('pause', video.paused ? 'paused' : 'not-paused', '');
+                return;
+            }
+            try {
+                var promise = video.play();
+                if (promise && typeof promise.then === 'function') {
+                    promise.then(function(){ report('play', 'resolved', ''); })
+                        .catch(function(error){ report('play', 'rejected', error && error.name); });
+                } else {
+                    report('play', video.paused ? 'still-paused' : 'playing', '');
+                }
+            } catch (error) {
+                report('play', 'threw', error && error.name);
             }
         })();
         """
-        webView.evaluateJavaScript(js, completionHandler: nil)
-    }
-
-    func manualInject() {
-        injectScripts(for: playbackMode)
+        diagnostics.log("media", "togglePlayPause requested id=\(operationID) source=\(operation.source)")
+        target.evaluateJavaScript(js) { [weak self] _, error in
+            guard let self, let error else { return }
+            self.pendingPlaybackOperations.removeValue(forKey: operationID)
+            self.diagnostics.log(
+                "play",
+                "injection failed id=\(operationID) source=\(operation.source) type=\(String(describing: type(of: error)))",
+                attempt: operation.attempt
+            )
+        }
     }
 
     func onDismissSplash() {
-        let now = Date()
-        if now.timeIntervalSince(switchStartTime) < 1.5 {
-            return
-        }
+        if Date().timeIntervalSince(switchStartTime) < 1.5 { return }
         shouldDismissSplash = true
     }
 
@@ -703,21 +789,46 @@ final class WebViewModel: NSObject, ObservableObject {
     }
 }
 
-// MARK: - WKNavigationDelegate
-
 extension WebViewModel: WKNavigationDelegate {
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        if webView === cctvWebView {
-            injectScripts(for: .cctv, into: webView)
-            if let slug = activeCctvSlug {
-                fetchEpg(for: slug)
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        let key = ObjectIdentifier(webView)
+        activeDiagnosticDocuments[key] = []
+        activeDiagnosticNavigationIDs.removeValue(forKey: key)
+        diagnostics.log("nav", "didStart \(describe(webView))")
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        let navigationID = UUID().uuidString
+        activeDiagnosticNavigationIDs[ObjectIdentifier(webView)] = navigationID
+        guard webView === cctvWebView || webView === probeWebView else { return }
+        let js = "window.__lwtvRegisterNativeDocument && window.__lwtvRegisterNativeDocument('\(navigationID)');"
+        webView.evaluateJavaScript(js) { [weak self, weak webView] _, error in
+            guard let self, let webView else { return }
+            if let error {
+                let nsError = error as NSError
+                self.diagnostics.log(
+                    "probe",
+                    "native document registration failed source=\(self.describe(webView)) domain=\(nsError.domain) code=\(nsError.code)"
+                )
             }
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        let url = webView.url?.absoluteString ?? ""
+        diagnostics.log("nav", "didFinish \(describe(webView)) \(diagnostics.redactURLString(url))")
+        if webView === probeWebView {
+            diagnostics.log("nav", "probe final \(diagnostics.redactURLString(url)) session=\(probeSessionID)")
             return
         }
-
+        if webView === cctvWebView {
+            injectScripts(for: .cctv, into: webView)
+            if let slug = activeCctvSlug { fetchEpg(for: slug) }
+            return
+        }
         injectScripts(for: .yangshipin, into: webView)
-        if playbackMode == .cctv {
-            setYangshipinPlaybackAllowed(false)
+        if playbackMode != .yangshipin {
+            suspend(yangshipinWebView)
         }
         if let domIndex = pendingYangshipinDomIndex {
             clickYangshipinChannel(domIndex: domIndex)
@@ -728,33 +839,24 @@ extension WebViewModel: WKNavigationDelegate {
         }
     }
 
-    func webView(
-        _ webView: WKWebView,
-        didFail navigation: WKNavigation!,
-        withError error: Error
-    ) {
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         handleNavigationFailure(webView, error)
     }
 
-    func webView(
-        _ webView: WKWebView,
-        didFailProvisionalNavigation navigation: WKNavigation!,
-        withError error: Error
-    ) {
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         handleNavigationFailure(webView, error)
     }
 
     private func handleNavigationFailure(_ webView: WKWebView, _ error: Error) {
         let nsError = error as NSError
-        if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
-            return
-        }
+        if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled { return }
+        diagnostics.log("nav", "fail \(describe(webView)) domain=\(nsError.domain) code=\(nsError.code)")
         if webView === cctvWebView {
-            retryNextCctvURL()
+            playbackError = "央视网页面加载失败"
+            shouldDismissSplash = true
             return
         }
-        if yangshipinBootstrapInProgress {
-            print("[LiteWebTV] Yangshipin bootstrap navigation failed, falling back to CCTV")
+        if webView === yangshipinWebView, yangshipinBootstrapInProgress, logicalChannels.isEmpty {
             enterCctvOnlyMode(startIndex: 0, markYangshipinUnavailable: false)
         }
     }
@@ -765,71 +867,77 @@ extension WebViewModel: WKNavigationDelegate {
         preferences: WKWebpagePreferences,
         decisionHandler: @escaping (WKNavigationActionPolicy, WKWebpagePreferences) -> Void
     ) {
-        preferences.preferredContentMode = (webView === cctvWebView) ? .mobile : .desktop
-
+        if webView === yangshipinWebView {
+            preferences.preferredContentMode = .desktop
+        } else {
+            preferences.preferredContentMode = .mobile
+        }
         guard let url = navigationAction.request.url else {
             decisionHandler(.allow, preferences)
             return
         }
-
         let scheme = url.scheme?.lowercased() ?? ""
         let absolute = url.absoluteString.lowercased()
-
-        if scheme == "cntvcbox"
-            || scheme == "itms-apps"
-            || scheme == "itms"
-            || absolute.contains("apps.apple.com")
-            || absolute.contains("itunes.apple.com") {
+        if scheme == "cntvcbox" || scheme == "itms-apps" || scheme == "itms"
+            || absolute.contains("apps.apple.com") || absolute.contains("itunes.apple.com") {
+            diagnostics.log("nav", "cancel app jump \(diagnostics.redactURLString(url.absoluteString))")
             decisionHandler(.cancel, preferences)
             return
         }
-
+        if webView === probeWebView {
+            if scheme == "http" || scheme == "https" {
+                diagnostics.log("nav", "probe allow \(diagnostics.redactURLString(url.absoluteString))")
+                decisionHandler(.allow, preferences)
+                return
+            }
+            diagnostics.log("nav", "probe cancel non-http \(diagnostics.redactURLString(url.absoluteString))")
+            decisionHandler(.cancel, preferences)
+            return
+        }
         if webView === cctvWebView, isDesktopCctvLiveURL(url) {
+            diagnostics.log("nav", "stay on mobile, ignore \(diagnostics.redactURLString(url.absoluteString))")
             decisionHandler(.cancel, preferences)
             return
         }
-
         decisionHandler(.allow, preferences)
     }
 }
 
-// MARK: - WKScriptMessageHandler
-
 extension WebViewModel: WKScriptMessageHandler {
-    func userContentController(
-        _ userContentController: WKUserContentController,
-        didReceive message: WKScriptMessage
-    ) {
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        if message.name == "diag" {
+            handleDiag(message)
+            return
+        }
         guard let body = message.body as? [String: Any],
               let type = body["type"] as? String else { return }
 
         DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
+            guard let self else { return }
+            let fromYangshipin = message.webView === self.yangshipinWebView
 
             switch type {
             case "channelList":
                 guard self.yangshipinPlayable else { return }
+                guard fromYangshipin, message.frameInfo.isMainFrame else { return }
                 guard let jsonString = body["data"] as? String,
                       let data = jsonString.data(using: .utf8),
                       let list = try? JSONDecoder().decode([ChannelItem].self, from: data)
                 else { return }
-
                 self.updateLogicalChannels(from: list)
 
             case "programList":
-                guard self.playbackMode == .yangshipin else { return }
+                guard self.playbackMode == .yangshipin, !self.isCompareMode else { return }
                 guard let jsonString = body["data"] as? String,
                       let data = jsonString.data(using: .utf8),
                       let list = try? JSONDecoder().decode([ProgramItem].self, from: data)
                 else { return }
-
                 self.refreshCurrentProgram(using: list)
 
             case "title":
+                if fromYangshipin && self.playbackMode != .yangshipin { return }
                 if self.playbackMode == .cctv {
-                    if let title = body["data"] as? String {
-                        self.setCurrentTitle(title)
-                    }
+                    if let title = body["data"] as? String { self.setCurrentTitle(title) }
                     return
                 }
                 if !self.programs.isEmpty && self.currentProgramIndex < self.programs.count {
@@ -839,17 +947,116 @@ extension WebViewModel: WKScriptMessageHandler {
                 }
 
             case "dismissSplash":
+                if self.isCompareMode { return }
+                if fromYangshipin && self.playbackMode != .yangshipin { return }
                 self.onDismissSplash()
 
-            case "cctvRestricted":
-                guard self.playbackMode == .cctv else { return }
-                self.retryNextCctvURL()
-
             case "console":
-                if let level = body["level"] as? String, let msg = body["data"] as? String {
-                    print("[JS Console] [\(level.uppercased())] \(msg)")
+                if let level = body["level"] as? String, let msg = body["data"] as? String,
+                   level == "error" || msg.contains("[CCTV]") {
+                    let marker = msg.contains("play rejected") ? "cctv play rejected" : "filtered console event"
+                    self.diagnostics.log("js-\(level)", marker)
                 }
 
+            case "appPlaybackResult":
+                guard message.frameInfo.isMainFrame,
+                      let webView = message.webView,
+                      webView === self.yangshipinWebView || webView === self.cctvWebView || webView === self.probeWebView,
+                      let operationID = body["operationID"] as? String,
+                      let operation = self.pendingPlaybackOperations.removeValue(forKey: operationID),
+                      operation.webViewID == ObjectIdentifier(webView),
+                      let action = body["action"] as? String,
+                      let result = body["result"] as? String else { return }
+                let errorName = body["errorName"] as? String ?? ""
+                let currentNavigationID = self.activeDiagnosticNavigationIDs[ObjectIdentifier(webView)]
+                let navigationStatus = operation.navigationID == currentNavigationID ? "same-navigation" : "navigation-changed"
+                self.diagnostics.log(
+                    "play",
+                    "app id=\(operationID) source=\(operation.source) action=\(action) result=\(result) error=\(errorName) \(navigationStatus)",
+                    attempt: operation.attempt
+                )
+
+            default:
+                break
+            }
+        }
+    }
+
+    private func handleDiag(_ message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any],
+              let type = body["type"] as? String,
+              let webView = message.webView,
+              webView === yangshipinWebView || webView === cctvWebView || webView === probeWebView,
+              let documentID = body["documentID"] as? String,
+              !documentID.isEmpty else { return }
+        DispatchQueue.main.async {
+            guard webView === self.yangshipinWebView || webView === self.cctvWebView || webView === self.probeWebView else {
+                return
+            }
+            let key = ObjectIdentifier(webView)
+            let source = self.describe(webView)
+            let session = body["session"] as? Int ?? 0
+            if webView === self.probeWebView, session != self.probeSessionID {
+                self.diagnostics.log("probe", "ignored stale session=\(session) current=\(self.probeSessionID)")
+                return
+            }
+            if type == "probeReady" {
+                let isMainFrame = (body["mainFrame"] as? Bool) == true
+                if isMainFrame {
+                    let navigationID = body["navigationID"] as? String ?? ""
+                    guard !navigationID.isEmpty,
+                          navigationID == self.activeDiagnosticNavigationIDs[key] else {
+                        self.diagnostics.log("probe", "ignored obsolete main document on \(source)")
+                        return
+                    }
+                }
+                self.activeDiagnosticDocuments[key, default: []].insert(documentID)
+            } else if self.activeDiagnosticDocuments[key]?.contains(documentID) != true {
+                self.diagnostics.log("probe", "ignored stale document on \(source)")
+                return
+            }
+            if type == "documentClosed" {
+                self.activeDiagnosticDocuments[key]?.remove(documentID)
+                self.diagnostics.log("probe", "document closed on \(source)")
+                return
+            }
+
+            let href = self.diagnostics.redactURLString(body["href"] as? String ?? "")
+            let data = body["data"] as? [String: Any] ?? [:]
+            let frame = (body["mainFrame"] as? Bool) == true ? "main" : "sub"
+            switch type {
+            case "probeReady":
+                let ua = body["ua"] as? String ?? ""
+                let appVersion = body["appVersion"] as? String ?? ""
+                self.diagnostics.log("probe", "\(source) ready frame=\(frame) href=\(href) ua=\(ua) appVersion=\(appVersion)")
+            case "video":
+                let event = data["event"] as? String ?? "unknown"
+                let video = data["video"] as? [String: Any] ?? [:]
+                let src = self.diagnostics.redactURLString(video["src"] as? String ?? "")
+                let ready = video["ready"] as? Int ?? -1
+                let network = video["network"] as? Int ?? -1
+                let paused = video["paused"] as? Bool ?? true
+                let muted = video["muted"] as? Bool ?? false
+                let width = video["w"] as? Int ?? 0
+                let height = video["h"] as? Int ?? 0
+                let seconds = video["t"] as? Int ?? 0
+                let errorCode = (video["error"] as? [String: Any])?["code"] as? Int ?? 0
+                self.diagnostics.log(
+                    "video",
+                    "\(source) frame=\(frame) event=\(event) ready=\(ready) network=\(network) paused=\(paused) muted=\(muted) size=\(width)x\(height) t=\(seconds) error=\(errorCode) src=\(src)"
+                )
+            case "rightsOverlay":
+                let present = data["present"] as? Bool ?? true
+                self.diagnostics.log("overlay", "restricted prompt \(present ? "visible" : "hidden") on \(source) frame=\(frame) href=\(href)")
+            case "pageError":
+                let name = data["name"] as? String ?? "Error"
+                let path = data["filePath"] as? String ?? ""
+                let line = data["line"] as? Int ?? 0
+                let column = data["column"] as? Int ?? 0
+                self.diagnostics.log("page", "error name=\(name) path=\(path) line=\(line):\(column) source=\(source)")
+            case "unhandledRejection":
+                let name = data["name"] as? String ?? "unknown"
+                self.diagnostics.log("page", "unhandled rejection name=\(name) source=\(source)")
             default:
                 break
             }
@@ -863,17 +1070,11 @@ extension WebViewModel: WKScriptMessageHandler {
             currentProgramIndex = 0
             return
         }
-
         let nowMinutes = currentBeijingMinutes()
         let activeIndex = activeProgramIndex(in: list, nowMinutes: nowMinutes) ?? max(0, list.count - 1)
-
-        for idx in list.indices {
-            list[idx].isCurrent = (idx == activeIndex)
-        }
-
+        for idx in list.indices { list[idx].isCurrent = idx == activeIndex }
         programs = list
         currentProgramIndex = activeIndex
-
         if activeIndex < list.count {
             setCurrentTitle(list[activeIndex].title)
         }
@@ -890,9 +1091,7 @@ extension WebViewModel: WKScriptMessageHandler {
         var lastIndex: Int?
         for (index, item) in list.enumerated() {
             guard let minutes = parseTimeToMinutes(item.time) else { continue }
-            if minutes <= nowMinutes {
-                lastIndex = index
-            }
+            if minutes <= nowMinutes { lastIndex = index }
         }
         return lastIndex
     }
@@ -910,13 +1109,14 @@ extension WebViewModel: WKScriptMessageHandler {
 
     private func parseTimeToMinutes(_ text: String) -> Int? {
         let parts = text.split(separator: ":")
-        guard parts.count == 2,
-              let h = Int(parts[0]),
-              let m = Int(parts[1]),
-              h >= 0, h <= 23,
-              m >= 0, m <= 59 else {
-            return nil
-        }
+        guard parts.count == 2, let h = Int(parts[0]), let m = Int(parts[1]),
+              (0...23).contains(h), (0...59).contains(m) else { return nil }
         return h * 60 + m
+    }
+}
+
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
     }
 }
