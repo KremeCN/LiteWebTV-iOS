@@ -1048,7 +1048,47 @@ extension WebViewModel: WKScriptMessageHandler {
                 )
             case "rightsOverlay":
                 let present = data["present"] as? Bool ?? true
-                self.diagnostics.log("overlay", "restricted prompt \(present ? "visible" : "hidden") on \(source) frame=\(frame) href=\(href)")
+                let kind = data["kind"] as? String ?? ""
+                let snippet = data["snippet"] as? String ?? ""
+                self.diagnostics.log(
+                    "overlay",
+                    "restricted prompt \(present ? "visible" : "hidden") kind=\(kind) snippet=\(snippet) on \(source) frame=\(frame) href=\(href)"
+                )
+            case "vdn":
+                let host = data["host"] as? String ?? ""
+                let path = data["path"] as? String ?? ""
+                let pdrm = data["pdrm"] as? String ?? ""
+                let channel = data["channel"] as? String ?? ""
+                let play = data["play"] as? String ?? ""
+                let ack = data["ack"] as? String ?? ""
+                let parse = data["parse"] as? String ?? ""
+                let hasHlsNd = data["hasHlsNd"] as? Bool ?? false
+                let hasHlsCdrm = data["hasHlsCdrm"] as? Bool ?? false
+                let hasBackupNd = data["hasBackupNd"] as? Bool ?? false
+                let hasBackupCdrm = data["hasBackupCdrm"] as? Bool ?? false
+                let manifestKeys = data["manifestKeys"] as? String ?? ""
+                let tipKind = data["tipKind"] as? String ?? ""
+                let status = data["status"] as? Int ?? 0
+                self.diagnostics.log(
+                    "vdn",
+                    "\(source) frame=\(frame) host=\(host) path=\(path) status=\(status) pdrm=\(pdrm) channel=\(channel) parse=\(parse) ack=\(ack) play=\(play) hlsNd=\(hasHlsNd) hlsCdrm=\(hasHlsCdrm) backupNd=\(hasBackupNd) backupCdrm=\(hasBackupCdrm) tip=\(tipKind) keys=\(manifestKeys)"
+                )
+            case "playerBranch":
+                let safari = data["safari"] as? Bool ?? false
+                let iosHttps = data["iosHttps"] as? Bool ?? false
+                let iosVer = data["iosVer"] as? String ?? ""
+                let wasm = data["wasm"] as? Bool ?? false
+                let mse = data["mse"] as? Bool ?? false
+                let eme = data["eme"] as? Bool ?? false
+                let jumpToApp = data["jumpToApp"] as? String ?? ""
+                let isDrm = data["isDrm"] as? Bool ?? false
+                let isIosDrmFlag = data["isIosDrmFlag"] as? Bool ?? false
+                let isIosDrmFn = data["isIosDrmFn"] as? String ?? ""
+                let videoUrlKind = data["videoUrlKind"] as? String ?? ""
+                self.diagnostics.log(
+                    "player",
+                    "\(source) frame=\(frame) safari=\(safari) iosHttps=\(iosHttps) iosVer=\(iosVer) wasm=\(wasm) mse=\(mse) eme=\(eme) jumpToApp=\(jumpToApp) isDrm=\(isDrm) isIosDrmFlag=\(isIosDrmFlag) isIosDrmFn=\(isIosDrmFn) videoUrlKind=\(videoUrlKind)"
+                )
             case "pageError":
                 let name = data["name"] as? String ?? "Error"
                 let path = data["filePath"] as? String ?? ""
