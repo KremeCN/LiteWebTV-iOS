@@ -11,10 +11,22 @@
         { keys: ['流畅', '360'], rank: 50 }
     ];
 
+    var PLAYER_STYLE = 'position:fixed!important;top:0!important;left:0!important;width:100vw!important;height:100vh!important;z-index:99999!important;background:#000!important;margin:0!important;padding:0!important;overflow:hidden!important;';
+    var VIDEO_BOX_STYLE = 'position:fixed!important;top:0!important;left:0!important;width:100vw!important;height:100vh!important;z-index:99998!important;background:#000!important;margin:0!important;padding:0!important;';
+    var VIDEO_STYLE = 'width:100%!important;height:100%!important;object-fit:contain!important;';
+    var LAYOUT_MARK = 'data-lwtv-layout';
+
     function postConsole(level, msg) {
         if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridge) {
             window.webkit.messageHandlers.bridge.postMessage({ type: 'console', level: level, data: msg });
         }
+    }
+
+    function applyStyleOnce(el, style) {
+        if (!el || el.getAttribute(LAYOUT_MARK) === '1') return false;
+        el.style.cssText = style;
+        el.setAttribute(LAYOUT_MARK, '1');
+        return true;
     }
 
     function disableAllInputs() {
@@ -44,46 +56,57 @@
         ];
         selectors.forEach(function (sel) {
             document.querySelectorAll(sel).forEach(function (el) {
+                if (el.getAttribute('data-lwtv-hidden') === '1') return;
                 el.style.setProperty('display', 'none', 'important');
+                el.setAttribute('data-lwtv-hidden', '1');
             });
         });
-        document.body.style.backgroundColor = 'black';
-        document.documentElement.style.backgroundColor = 'black';
-        document.body.style.overflow = 'hidden';
+        if (document.body.getAttribute('data-lwtv-page') !== '1') {
+            document.body.style.backgroundColor = 'black';
+            document.body.style.overflow = 'hidden';
+            document.documentElement.style.backgroundColor = 'black';
+            document.body.setAttribute('data-lwtv-page', '1');
+        }
     }
 
     function applyFullscreenPlayer() {
+        var changed = false;
         var ids = ['player', 'html5Player', 'html5Player_live', 'html5VideoBack', 'html5ControlDiv'];
         ids.forEach(function (id) {
-            var el = document.getElementById(id);
-            if (!el) return;
-            el.style.cssText = 'position:fixed!important;top:0!important;left:0!important;width:100vw!important;height:100vh!important;z-index:99999!important;background:#000!important;margin:0!important;padding:0!important;overflow:hidden!important;';
+            if (applyStyleOnce(document.getElementById(id), PLAYER_STYLE)) {
+                changed = true;
+            }
         });
 
         var videoBox = document.querySelector('.video_box');
-        if (videoBox) {
-            videoBox.style.cssText = 'position:fixed!important;top:0!important;left:0!important;width:100vw!important;height:100vh!important;z-index:99998!important;background:#000!important;margin:0!important;padding:0!important;';
+        if (applyStyleOnce(videoBox, VIDEO_BOX_STYLE)) {
+            changed = true;
         }
 
         var video = document.querySelector('video');
         if (video) {
-            video.style.cssText = 'width:100%!important;height:100%!important;object-fit:contain!important;';
+            if (applyStyleOnce(video, VIDEO_STYLE)) {
+                changed = true;
+            }
             video.setAttribute('playsinline', 'true');
             video.setAttribute('webkit-playsinline', 'true');
         }
+        return changed;
     }
 
     function tryPlayVideo() {
         var video = document.querySelector('video');
         if (!video) return false;
+        if (!video.paused) return true;
 
-        if (video.muted) {
-            video.muted = false;
+        // iOS 允许静音自动播放；起播后再由 unmute 任务取消静音
+        video.muted = true;
+        var playPromise = video.play();
+        if (playPromise && typeof playPromise.then === 'function') {
+            playPromise.catch(function () { });
+            return false;
         }
-        if (video.paused) {
-            video.play().catch(function () {});
-        }
-        return true;
+        return !video.paused;
     }
 
     function clickPlayButton() {
@@ -167,16 +190,6 @@
         return false;
     }
 
-    function tryDismissSplash() {
-        var video = document.querySelector('video');
-        if (!video) return;
-        if (!video.paused && video.readyState >= 3 && video.currentTime > 0.1) {
-            if (window.Android && window.Android.dismissSplash) {
-                window.Android.dismissSplash();
-            }
-        }
-    }
-
     // =========================================================
     // 任务注册式 MutationObserver（与 automation.js 同模式）
     // =========================================================
@@ -207,12 +220,13 @@
     }
 
     function _startObserver() {
+        // 不监听 style，避免 applyFullscreenPlayer 写样式后自激触发
         _observer = new MutationObserver(_scheduleRun);
         _observer.observe(document.documentElement, {
             childList: true,
             subtree: true,
             attributes: true,
-            attributeFilter: ['style', 'class']
+            attributeFilter: ['class']
         });
     }
 
@@ -233,7 +247,9 @@
     addTask('unmute', function () {
         var video = document.querySelector('video');
         if (!video) return false;
-        if (video.muted) video.muted = false;
+        if (video.paused) return false;
+        if (!video.muted) return true;
+        video.muted = false;
         return true;
     });
 
@@ -273,8 +289,8 @@
         return true;
     });
 
-    // 持续维护全屏与隐藏（永久任务）
-    addTask('maintainLayout', function () {
+    // DOM 变更时按需补布局；幂等写入，不监听 style 属性
+    addTask('layoutRefresh', function () {
         hidePageChrome();
         applyFullscreenPlayer();
         return false;

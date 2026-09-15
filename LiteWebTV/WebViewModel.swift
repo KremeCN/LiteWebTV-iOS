@@ -38,6 +38,10 @@ final class WebViewModel: NSObject, ObservableObject {
     private var pendingYangshipinDomIndex: Int?
     private var cctvURLOptions: [URL] = []
     private var cctvURLIndex = 0
+    private var yangshipinBootstrapInProgress = false
+    private var yangshipinBootstrapTimeoutTask: DispatchWorkItem?
+
+    private let yangshipinBootstrapTimeout: TimeInterval = 15.0
 
     // MARK: - WebView
 
@@ -66,28 +70,21 @@ final class WebViewModel: NSObject, ObservableObject {
 
     // MARK: - Public Helpers
 
-    var currentLogicalChannel: LogicalChannel? {
-        guard currentChannelIndex >= 0, currentChannelIndex < logicalChannels.count else { return nil }
-        return logicalChannels[currentChannelIndex]
-    }
+    /// 为指定频道选择播放源。若频道或源发生变化则重新加载并返回 `true`。
+    @discardableResult
+    func selectSource(_ source: StreamSource, at listIndex: Int) -> Bool {
+        guard listIndex >= 0, listIndex < logicalChannels.count else { return false }
+        let channel = logicalChannels[listIndex]
+        guard channel.availableSources.contains(source) else { return false }
 
-    var canSwitchSource: Bool {
-        yangshipinPlayable && (currentLogicalChannel?.canSwitchSource ?? false)
-    }
-
-    var currentSourceLabel: String {
-        currentLogicalChannel?.selectedSource.displayName ?? ""
-    }
-
-    func selectSource(_ source: StreamSource) {
-        guard let channel = currentLogicalChannel,
-              channel.availableSources.contains(source),
-              channel.selectedSource != source else { return }
-
+        let needsReload = listIndex != currentChannelIndex || channel.selectedSource != source
         SourcePreferenceStore.save(channelId: channel.id, source: source)
-        logicalChannels[currentChannelIndex].selectedSource = source
+        logicalChannels[listIndex].selectedSource = source
+        guard needsReload else { return false }
+
         playbackError = nil
-        applyLogicalChannel(at: currentChannelIndex)
+        applyLogicalChannel(at: listIndex)
+        return true
     }
 
     // MARK: - Script Loading
@@ -141,7 +138,7 @@ final class WebViewModel: NSObject, ObservableObject {
             if supported {
                 self.enterYangshipinCapabilityMode()
             } else {
-                self.enterCctvOnlyMode(startIndex: 0)
+                self.enterCctvOnlyMode(startIndex: 0, markYangshipinUnavailable: true)
             }
         }
     }
@@ -149,16 +146,46 @@ final class WebViewModel: NSObject, ObservableObject {
     private func enterYangshipinCapabilityMode() {
         playbackMode = .yangshipin
         webView.customUserAgent = pcUserAgent
+        beginYangshipinBootstrap()
         loadYangshipinHome()
     }
 
-    private func enterCctvOnlyMode(startIndex: Int) {
-        yangshipinPlayable = false
+    private func enterCctvOnlyMode(startIndex: Int, markYangshipinUnavailable: Bool = true) {
+        cancelYangshipinBootstrap()
+        if markYangshipinUnavailable {
+            yangshipinPlayable = false
+        }
         playbackMode = .cctv
         webView.customUserAgent = nil
         currentChannelIndex = min(max(startIndex, 0), CCTVCatalog.channels.count - 1)
         logicalChannels = ChannelMerger.cctvOnlyChannels(activeIndex: currentChannelIndex)
         applyLogicalChannel(at: currentChannelIndex)
+    }
+
+    private func beginYangshipinBootstrap() {
+        yangshipinBootstrapInProgress = true
+        yangshipinBootstrapTimeoutTask?.cancel()
+        let task = DispatchWorkItem { [weak self] in
+            guard let self, self.yangshipinBootstrapInProgress else { return }
+            if self.logicalChannels.isEmpty {
+                print("[LiteWebTV] Yangshipin bootstrap timed out, falling back to CCTV")
+                self.enterCctvOnlyMode(startIndex: 0, markYangshipinUnavailable: false)
+            }
+        }
+        yangshipinBootstrapTimeoutTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + yangshipinBootstrapTimeout, execute: task)
+    }
+
+    private func completeYangshipinBootstrap() {
+        yangshipinBootstrapInProgress = false
+        yangshipinBootstrapTimeoutTask?.cancel()
+        yangshipinBootstrapTimeoutTask = nil
+    }
+
+    private func cancelYangshipinBootstrap() {
+        yangshipinBootstrapInProgress = false
+        yangshipinBootstrapTimeoutTask?.cancel()
+        yangshipinBootstrapTimeoutTask = nil
     }
 
     private func loadYangshipinHome() {
@@ -180,11 +207,15 @@ final class WebViewModel: NSObject, ObservableObject {
             guard let slug = channel.cctvSlug else { return }
             playbackMode = .cctv
             webView.customUserAgent = nil
+            pendingYangshipinDomIndex = nil
             loadCctvPage(for: slug)
         case .yangshipin:
             guard let domIndex = channel.yangshipinDomIndex else { return }
             playbackMode = .yangshipin
             webView.customUserAgent = pcUserAgent
+            activeCctvSlug = nil
+            programs = []
+            currentProgramIndex = 0
             loadYangshipinChannel(domIndex: domIndex)
         }
     }
@@ -236,9 +267,21 @@ final class WebViewModel: NSObject, ObservableObject {
     }
 
     private func updateLogicalChannels(from yangshipinItems: [ChannelItem]) {
-        logicalChannels = ChannelMerger.merge(yangshipinItems: yangshipinItems)
+        let preservedIndex = currentChannelIndex
+        let preserveCurrentIndex = playbackMode == .cctv
+            && preservedIndex < logicalChannels.count
+            && logicalChannels[preservedIndex].selectedSource == .cctv
 
-        if let activeDomIndex = yangshipinItems.firstIndex(where: { $0.isActive }) {
+        logicalChannels = ChannelMerger.merge(yangshipinItems: yangshipinItems)
+        completeYangshipinBootstrap()
+
+        if preserveCurrentIndex {
+            if preservedIndex < logicalChannels.count {
+                currentChannelIndex = preservedIndex
+            } else if currentChannelIndex >= logicalChannels.count {
+                currentChannelIndex = max(0, logicalChannels.count - 1)
+            }
+        } else if let activeDomIndex = yangshipinItems.firstIndex(where: { $0.isActive }) {
             let domIndex = yangshipinItems[activeDomIndex].index
             if let listIndex = logicalChannels.firstIndex(where: { $0.yangshipinDomIndex == domIndex }) {
                 currentChannelIndex = listIndex
@@ -330,9 +373,15 @@ final class WebViewModel: NSObject, ObservableObject {
             }
 
             DispatchQueue.main.async {
+                guard self.playbackMode == .cctv, self.activeCctvSlug == slug else { return }
                 self.applyEpgEntries(entries, liveTitle: channel.isLive)
             }
         }.resume()
+    }
+
+    private func setCurrentTitle(_ title: String) {
+        guard !title.isEmpty, currentTitle != title else { return }
+        currentTitle = title
     }
 
     private func applyEpgEntries(_ entries: [CCTVEPGEntry], liveTitle: String?) {
@@ -352,7 +401,7 @@ final class WebViewModel: NSObject, ObservableObject {
             programs = []
             currentProgramIndex = 0
             if let liveTitle, !liveTitle.isEmpty {
-                currentTitle = liveTitle
+                setCurrentTitle(liveTitle)
             }
             return
         }
@@ -368,9 +417,9 @@ final class WebViewModel: NSObject, ObservableObject {
         currentProgramIndex = activeIndex
 
         if activeIndex < list.count {
-            currentTitle = list[activeIndex].title
+            setCurrentTitle(list[activeIndex].title)
         } else if let liveTitle, !liveTitle.isEmpty {
-            currentTitle = liveTitle
+            setCurrentTitle(liveTitle)
         }
     }
 
@@ -534,6 +583,11 @@ extension WebViewModel: WKNavigationDelegate {
         }
         if playbackMode == .cctv {
             retryNextCctvURL()
+            return
+        }
+        if playbackMode == .yangshipin && yangshipinBootstrapInProgress {
+            print("[LiteWebTV] Yangshipin bootstrap navigation failed, falling back to CCTV")
+            enterCctvOnlyMode(startIndex: 0, markYangshipinUnavailable: false)
         }
     }
 
@@ -597,15 +651,15 @@ extension WebViewModel: WKScriptMessageHandler {
 
             case "title":
                 if self.playbackMode == .cctv {
-                    if let title = body["data"] as? String, !title.isEmpty {
-                        self.currentTitle = title
+                    if let title = body["data"] as? String {
+                        self.setCurrentTitle(title)
                     }
                     return
                 }
                 if !self.programs.isEmpty && self.currentProgramIndex < self.programs.count {
-                    self.currentTitle = self.programs[self.currentProgramIndex].title
-                } else if let title = body["data"] as? String, !title.isEmpty {
-                    self.currentTitle = title
+                    self.setCurrentTitle(self.programs[self.currentProgramIndex].title)
+                } else if let title = body["data"] as? String {
+                    self.setCurrentTitle(title)
                 }
 
             case "dismissSplash":
@@ -641,10 +695,7 @@ extension WebViewModel: WKScriptMessageHandler {
         currentProgramIndex = activeIndex
 
         if activeIndex < list.count {
-            let nextTitle = list[activeIndex].title
-            if currentTitle != nextTitle {
-                currentTitle = nextTitle
-            }
+            setCurrentTitle(list[activeIndex].title)
         }
     }
 

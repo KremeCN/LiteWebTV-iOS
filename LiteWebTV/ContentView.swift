@@ -43,7 +43,6 @@ struct ContentView: View {
     @State private var showTitle = false
     @State private var titleText = ""
     @State private var hideTitleTask: Task<Void, Never>?
-    @State private var showSourcePicker = false
 
     // 开屏幕布
     @State private var showSplash = true
@@ -102,6 +101,15 @@ struct ContentView: View {
                                 let name = viewModel.switchChannel(at: listIndex)
                                 closeSidebars()
                                 showSplashScreen(statusText: "即将进入：\(name)")
+                            },
+                            onSelectSource: { listIndex, source in
+                                guard viewModel.logicalChannels.indices.contains(listIndex) else { return }
+                                let name = viewModel.logicalChannels[listIndex].name
+                                let didChange = viewModel.selectSource(source, at: listIndex)
+                                closeSidebars()
+                                if didChange {
+                                    showSplashScreen(statusText: "即将进入：\(name)（\(source.displayName)）")
+                                }
                             }
                         )
                         .transition(.move(edge: .leading))
@@ -142,34 +150,16 @@ struct ContentView: View {
                 // Layer 6: Title tip (top center)
                 if showTitle {
                     VStack {
-                        VStack(spacing: 8) {
-                            Text(titleText)
-                                .font(.system(size: 22, weight: .bold))
-                                .foregroundColor(.white)
-
-                            if viewModel.canSwitchSource {
-                                Button {
-                                    showSourcePicker = true
-                                } label: {
-                                    Text(viewModel.currentSourceLabel)
-                                        .font(.system(size: 14, weight: .medium))
-                                        .foregroundColor(Color(hex: "00A1D6"))
-                                        .padding(.horizontal, 12)
-                                        .padding(.vertical, 6)
-                                        .background(
-                                            RoundedRectangle(cornerRadius: 8)
-                                                .stroke(Color(hex: "00A1D6"), lineWidth: 1)
-                                        )
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 32)
-                        .padding(.vertical, 16)
-                        .background(
-                            RoundedRectangle(cornerRadius: 12)
-                                .fill(Color.black.opacity(0.7))
-                        )
-                        .padding(.top, 40)
+                        Text(titleText)
+                            .font(.system(size: 22, weight: .bold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 32)
+                            .padding(.vertical, 16)
+                            .background(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .fill(Color.black.opacity(0.7))
+                            )
+                            .padding(.top, 40)
                         Spacer()
                     }
                     .zIndex(10)
@@ -238,23 +228,6 @@ struct ContentView: View {
         .onReceive(viewModel.$playbackError) { error in
             guard let error, !error.isEmpty else { return }
             showToastMessage(error)
-        }
-        .confirmationDialog("切换播放源", isPresented: $showSourcePicker, titleVisibility: .visible) {
-            if let channel = viewModel.currentLogicalChannel {
-                if channel.availableSources.contains(.yangshipin) {
-                    Button("央视频") {
-                        viewModel.selectSource(.yangshipin)
-                        showSplashScreen(statusText: "即将进入：\(channel.name)")
-                    }
-                }
-                if channel.availableSources.contains(.cctv) {
-                    Button("央视网") {
-                        viewModel.selectSource(.cctv)
-                        showSplashScreen(statusText: "即将进入：\(channel.name)")
-                    }
-                }
-            }
-            Button("取消", role: .cancel) {}
         }
     }
 
