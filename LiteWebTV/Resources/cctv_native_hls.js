@@ -107,20 +107,6 @@
         var style = document.createElement('style');
         style.id = 'lwtv-cctv-surface';
         style.textContent = [
-            'html.lwtv-cctv-playing video[id^="h5player_"],',
-            'html.lwtv-cctv-playing video[src*=".m3u8"] {',
-            '  display: block !important;',
-            '  visibility: visible !important;',
-            '  opacity: 1 !important;',
-            '  position: fixed !important;',
-            '  left: 0 !important;',
-            '  top: 0 !important;',
-            '  width: 100% !important;',
-            '  height: 100% !important;',
-            '  z-index: 2147483647 !important;',
-            '  object-fit: contain !important;',
-            '  background: #000 !important;',
-            '}',
             'html.lwtv-cctv-playing [id^="error_msg_"],',
             'html.lwtv-cctv-playing [id^="h5canvas_"],',
             'html.lwtv-cctv-playing [id^="jump_to_app_"],',
@@ -128,33 +114,57 @@
             'html.lwtv-cctv-playing [id^="loading_"] {',
             '  display: none !important;',
             '  visibility: hidden !important;',
-            '  opacity: 0 !important;',
             '  pointer-events: none !important;',
+            '}',
+            'html.lwtv-cctv-playing video[id^="h5player_"] {',
+            '  display: block !important;',
+            '  width: 100% !important;',
+            '  height: 100% !important;',
+            '  object-fit: contain !important;',
+            '  background: transparent !important;',
             '}'
         ].join('\n');
         (document.head || document.documentElement).appendChild(style);
     }
 
+    function playerHost(video) {
+        var id = video && video.id ? String(video.id) : '';
+        if (id.indexOf('h5player_') === 0) {
+            var host = document.getElementById(id.slice(9));
+            if (host) return host;
+        }
+        return video && video.parentElement;
+    }
+
     function surfaceVideo(video) {
         ensureStyle();
         document.documentElement.classList.add('lwtv-cctv-playing');
+        var host = playerHost(video);
+        if (host && !host.__lwtvHosted) {
+            host.__lwtvHosted = true;
+            try {
+                host.style.setProperty('position', 'fixed', 'important');
+                host.style.setProperty('left', '0', 'important');
+                host.style.setProperty('top', '0', 'important');
+                host.style.setProperty('width', '100%', 'important');
+                host.style.setProperty('height', '100%', 'important');
+                host.style.setProperty('z-index', '9999', 'important');
+                host.style.setProperty('background', '#000', 'important');
+                host.style.setProperty('overflow', 'hidden', 'important');
+            } catch (e) { }
+        }
+        if (video.__lwtvSurfaced) return;
+        video.__lwtvSurfaced = true;
         try {
-            if (document.body && video.parentElement !== document.body) {
-                document.body.appendChild(video);
-            }
-        } catch (e) { }
-        try {
+            video.style.removeProperty('background');
+            video.style.removeProperty('position');
+            video.style.removeProperty('z-index');
+            video.style.removeProperty('opacity');
             video.style.setProperty('display', 'block', 'important');
-            video.style.setProperty('visibility', 'visible', 'important');
-            video.style.setProperty('opacity', '1', 'important');
-            video.style.setProperty('position', 'fixed', 'important');
-            video.style.setProperty('left', '0', 'important');
-            video.style.setProperty('top', '0', 'important');
             video.style.setProperty('width', '100%', 'important');
             video.style.setProperty('height', '100%', 'important');
-            video.style.setProperty('z-index', '2147483647', 'important');
             video.style.setProperty('object-fit', 'contain', 'important');
-            video.style.setProperty('background', '#000', 'important');
+            video.style.setProperty('background', 'transparent', 'important');
         } catch (e) { }
     }
 
@@ -274,7 +284,6 @@
             return self.__lwtvPlayWait;
         };
         proto.pause = function () {
-            if (recovering || isActiveStream(this)) return;
             return originalPause.apply(this, arguments);
         };
         proto.__lwtvPlayWrapped = true;
