@@ -45,15 +45,12 @@
         });
     }
 
-    // Safari iPhone 直播走系统播放器：去掉 playsinline，不要把画面钉在 WKWebView 里。
-    function prepareNativeVideo() {
+    // Safari iPhone 页内 FairPlay 需要 playsinline；去掉后 liveplayer 会当成不能播 DRM。
+    function prepareInlineVideo() {
         var video = document.querySelector('video');
         if (!video) return false;
-        video.removeAttribute('playsinline');
-        video.removeAttribute('webkit-playsinline');
-        video.removeAttribute('x5-playsinline');
-        video.removeAttribute('x5-video-player-type');
-        try { video.disableRemotePlayback = false; } catch (e) {}
+        video.setAttribute('playsinline', 'true');
+        video.setAttribute('webkit-playsinline', 'true');
         return true;
     }
 
@@ -195,12 +192,12 @@
     addTask('pagePrep', function () {
         disableAllInputs();
         hideBlockingOverlays();
-        prepareNativeVideo();
+        prepareInlineVideo();
         return true;
     });
 
     addTask('autoPlay', function () {
-        prepareNativeVideo();
+        prepareInlineVideo();
         if (tryPlayVideo()) return true;
         return clickPlayButton();
     });
@@ -215,12 +212,12 @@
     });
 
     addTask('quality', function () {
-        prepareNativeVideo();
+        prepareInlineVideo();
         return selectHighestQuality();
     });
 
     addTask('nativePlayer', function () {
-        return prepareNativeVideo();
+        return prepareInlineVideo();
     });
 
     addTask('videoDebug', function () {
@@ -269,7 +266,7 @@
 
     addTask('layoutRefresh', function () {
         hideBlockingOverlays();
-        prepareNativeVideo();
+        prepareInlineVideo();
         return false;
     });
 
@@ -282,11 +279,8 @@
         if (video && !video.paused && video.readyState >= 2) {
             return true;
         }
-        postConsole('warn', '[CCTV] Rights overlay detected');
-        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridge) {
-            window.webkit.messageHandlers.bridge.postMessage({ type: 'cctvRestricted' });
-        }
-        return true;
+        postConsole('warn', '[CCTV] Rights overlay ua=' + navigator.userAgent);
+        return false;
     });
 
     window.extractData = function () { };

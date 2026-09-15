@@ -205,6 +205,7 @@
     // 3. 声音 (自动取消静音)
     // ==========================================
     addTask('unmute', () => {
+        if (!window.__lwtvAllowPlay) return false;
         revealControls();
         const muteBtn = document.querySelector('.voice.off');
         if (!muteBtn) return false;
@@ -234,6 +235,7 @@
     // 5. 播放 (自动点击播放按钮)
     // ==========================================
     addTask('autoPlay', () => {
+        if (!window.__lwtvAllowPlay) return false;
         revealControls();
         const startBtn = document.querySelector('.y-full-control-btnl .play.play1');
         const playingBtn = document.querySelector('.y-full-control-btnl .play.play2');

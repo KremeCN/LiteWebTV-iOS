@@ -137,10 +137,6 @@ struct ContentView: View {
                 // Layer 2: Gesture detection overlay
                 gestureLayer(in: geo)
 
-                if viewModel.playbackMode == .cctv && !showChannelSidebar && !showProgramSidebar {
-                    cctvEdgeHandles(in: geo)
-                }
-
                 // Layer 3: Channel sidebar (left)
                 if showChannelSidebar {
                     HStack(spacing: 0) {
@@ -314,33 +310,7 @@ struct ContentView: View {
                     }
             )
             .zIndex(15)
-            .allowsHitTesting(viewModel.playbackMode == .yangshipin || isMenuVisible)
-    }
-
-    /// 央视网要把点击交给页面/系统播放器，只留左右边缘划出手势。
-    private func cctvEdgeHandles(in geo: GeometryProxy) -> some View {
-        HStack(spacing: 0) {
-            Color.clear
-                .contentShape(Rectangle())
-                .frame(width: 36)
-                .gesture(cctvEdgeDrag(in: geo))
-            Spacer(minLength: 0)
-            Color.clear
-                .contentShape(Rectangle())
-                .frame(width: 36)
-                .gesture(cctvEdgeDrag(in: geo))
-        }
-        .zIndex(16)
-    }
-
-    private func cctvEdgeDrag(in geo: GeometryProxy) -> some Gesture {
-        DragGesture(minimumDistance: 0)
-            .onChanged { value in
-                handleDragChanged(value: value, in: geo)
-            }
-            .onEnded { value in
-                handleDragEnded(value: value, in: geo)
-            }
+            .allowsHitTesting(!isMenuVisible || !isTouchInSidebar)
     }
 
     private var isMenuVisible: Bool {
