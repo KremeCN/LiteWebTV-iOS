@@ -296,6 +296,22 @@
         return false;
     });
 
+    addTask('rightsOverlay', function () {
+        var bodyText = (document.body && document.body.innerText) || '';
+        if (bodyText.indexOf('本时段节目请使用电脑端') < 0) {
+            return false;
+        }
+        var video = document.querySelector('video');
+        if (video && !video.paused && video.readyState >= 2) {
+            return true;
+        }
+        postConsole('warn', '[CCTV] Rights overlay detected');
+        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridge) {
+            window.webkit.messageHandlers.bridge.postMessage({ type: 'cctvRestricted' });
+        }
+        return true;
+    });
+
     window.extractData = function () { };
 
 })();

@@ -27,6 +27,8 @@ final class WebViewModel: NSObject, ObservableObject {
 
     private let yangshipinURL = "https://www.yangshipin.cn/tv/home"
     private let pcUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    /// 不含 Mobile / iPhone / iPad：避免跳转 /m/，也避免 liveplayer 把 iOS 当成平板后弹出「请使用电脑端」。
+    private let cctvUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15"
     private let beijingTimeZone = TimeZone(identifier: "Asia/Shanghai")!
 
     private let switchDelay: TimeInterval = 3.0
@@ -156,7 +158,7 @@ final class WebViewModel: NSObject, ObservableObject {
             yangshipinPlayable = false
         }
         playbackMode = .cctv
-        webView.customUserAgent = nil
+        webView.customUserAgent = cctvUserAgent
         currentChannelIndex = min(max(startIndex, 0), CCTVCatalog.channels.count - 1)
         logicalChannels = ChannelMerger.cctvOnlyChannels(activeIndex: currentChannelIndex)
         applyLogicalChannel(at: currentChannelIndex)
@@ -206,7 +208,7 @@ final class WebViewModel: NSObject, ObservableObject {
         case .cctv:
             guard let slug = channel.cctvSlug else { return }
             playbackMode = .cctv
-            webView.customUserAgent = nil
+            webView.customUserAgent = cctvUserAgent
             pendingYangshipinDomIndex = nil
             loadCctvPage(for: slug)
         case .yangshipin:
@@ -267,20 +269,17 @@ final class WebViewModel: NSObject, ObservableObject {
     }
 
     private func updateLogicalChannels(from yangshipinItems: [ChannelItem]) {
-        let preservedIndex = currentChannelIndex
-        let preserveCurrentIndex = playbackMode == .cctv
-            && preservedIndex < logicalChannels.count
-            && logicalChannels[preservedIndex].selectedSource == .cctv
+        let preserveCctvSelection = playbackMode == .cctv
+            && currentChannelIndex < logicalChannels.count
+            && logicalChannels[currentChannelIndex].selectedSource == .cctv
+        let preservedId = preserveCctvSelection ? logicalChannels[currentChannelIndex].id : nil
 
         logicalChannels = ChannelMerger.merge(yangshipinItems: yangshipinItems)
         completeYangshipinBootstrap()
 
-        if preserveCurrentIndex {
-            if preservedIndex < logicalChannels.count {
-                currentChannelIndex = preservedIndex
-            } else if currentChannelIndex >= logicalChannels.count {
-                currentChannelIndex = max(0, logicalChannels.count - 1)
-            }
+        if preserveCctvSelection, let preservedId,
+           let listIndex = logicalChannels.firstIndex(where: { $0.id == preservedId }) {
+            currentChannelIndex = listIndex
         } else if let activeDomIndex = yangshipinItems.firstIndex(where: { $0.isActive }) {
             let domIndex = yangshipinItems[activeDomIndex].index
             if let listIndex = logicalChannels.firstIndex(where: { $0.yangshipinDomIndex == domIndex }) {
@@ -613,6 +612,11 @@ extension WebViewModel: WKNavigationDelegate {
             return
         }
 
+        if playbackMode == .cctv, isMobileCctvPath(url.path), isCurrentCctvURLDesktop() {
+            decisionHandler(.cancel)
+            return
+        }
+
         decisionHandler(.allow)
     }
 }
@@ -665,6 +669,14 @@ extension WebViewModel: WKScriptMessageHandler {
             case "dismissSplash":
                 self.onDismissSplash()
 
+            case "cctvRestricted":
+                guard self.playbackMode == .cctv else { return }
+                while self.cctvURLIndex + 1 < self.cctvURLOptions.count,
+                      self.isMobileCctvPath(self.cctvURLOptions[self.cctvURLIndex + 1].path) {
+                    self.cctvURLIndex += 1
+                }
+                self.retryNextCctvURL()
+
             case "console":
                 if let level = body["level"] as? String, let msg = body["data"] as? String {
                     print("[JS Console] [\(level.uppercased())] \(msg)")
@@ -715,6 +727,15 @@ extension WebViewModel: WKScriptMessageHandler {
             }
         }
         return lastIndex
+    }
+
+    private func isMobileCctvPath(_ path: String) -> Bool {
+        path.lowercased().contains("/m/") || path.lowercased().hasSuffix("/m")
+    }
+
+    private func isCurrentCctvURLDesktop() -> Bool {
+        guard cctvURLIndex < cctvURLOptions.count else { return false }
+        return !isMobileCctvPath(cctvURLOptions[cctvURLIndex].path)
     }
 
     private func parseTimeToMinutes(_ text: String) -> Int? {

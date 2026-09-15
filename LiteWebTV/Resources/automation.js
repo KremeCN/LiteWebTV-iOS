@@ -39,6 +39,9 @@
                         let fullText = span.textContent;
                         if (tag) fullText = fullText.replace(tag.textContent, '');
                         const name = fullText.trim();
+                        if (!name) {
+                            return;
+                        }
 
                         channelList.push({
                             index: index,
