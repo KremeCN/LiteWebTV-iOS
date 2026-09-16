@@ -57,17 +57,15 @@
             if (!ancestor.classList.contains('lwtv-cctv-ancestor')) ancestor.classList.add('lwtv-cctv-ancestor');
             ancestor = ancestor.parentElement;
         }
-        tameNativeVideo(video);
+        stripNativeControlsOnce(video);
     }
 
-    function tameNativeVideo(video) {
-        if (!video) return;
-        if (video.controls) video.controls = false;
-        if (video.hasAttribute('controls')) video.removeAttribute('controls');
+    function stripNativeControlsOnce(video) {
+        if (!video || video.getAttribute('data-lwtv-no-native') === '1') return;
+        video.setAttribute('data-lwtv-no-native', '1');
+        try { video.removeAttribute('controls'); } catch (e) { }
         if (!video.hasAttribute('playsinline')) video.setAttribute('playsinline', '');
         if (!video.hasAttribute('webkit-playsinline')) video.setAttribute('webkit-playsinline', '');
-        try { video.disablePictureInPicture = true; } catch (e) { }
-        try { video.disableRemotePlayback = true; } catch (e) { }
     }
 
     function tryPlayVideo() {
@@ -110,7 +108,7 @@
                 childList: true,
                 subtree: true,
                 attributes: true,
-                attributeFilter: ['class', 'controls']
+                attributeFilter: ['class']
             });
         }
         _scheduleRun();

@@ -281,7 +281,9 @@ final class WebViewModel: NSObject, ObservableObject {
             // Hide iOS native media chrome before the official player sets controls.
             let hideNativeChrome = """
             (function(){
-                var css = 'video::-webkit-media-controls,video::-webkit-media-controls-panel,video::-webkit-media-controls-enclosure,video::-webkit-media-controls-start-playback-button{display:none!important;-webkit-appearance:none!important;opacity:0!important}';
+                if (window.__lwtvCctvNativeChrome) return;
+                window.__lwtvCctvNativeChrome = true;
+                var css = 'video::-webkit-media-controls,video::-webkit-media-controls-panel,video::-webkit-media-controls-enclosure,video::-webkit-media-controls-start-playback-button{display:none!important;-webkit-appearance:none!important;opacity:0!important;width:0!important;height:0!important}';
                 function inject(){
                     if (document.getElementById('lwtv-cctv-native-chrome')) return;
                     var style = document.createElement('style');
@@ -291,6 +293,22 @@ final class WebViewModel: NSObject, ObservableObject {
                 }
                 inject();
                 document.addEventListener('DOMContentLoaded', inject);
+                // Keep native chrome off without toggling the attribute; toggling it flashes the iOS overlay.
+                var proto = HTMLMediaElement.prototype;
+                var desc = Object.getOwnPropertyDescriptor(proto, 'controls');
+                if (desc && desc.configurable && desc.set) {
+                    Object.defineProperty(proto, 'controls', {
+                        configurable: true,
+                        enumerable: desc.enumerable,
+                        get: function () { return false; },
+                        set: function () { }
+                    });
+                }
+                var origSetAttribute = Element.prototype.setAttribute;
+                Element.prototype.setAttribute = function (name, value) {
+                    if (this instanceof HTMLVideoElement && String(name).toLowerCase() === 'controls') return;
+                    return origSetAttribute.apply(this, arguments);
+                };
             })();
             """
             controller.addUserScript(
