@@ -23,8 +23,8 @@ final class WebViewModel: NSObject, ObservableObject {
     @Published var shouldDismissSplash: Bool = false
     @Published var currentChannelIndex: Int = 0
     @Published var currentProgramIndex: Int = 0
-    @Published private(set) var playbackMode: PlaybackMode = SourceCapability.meetsMinimumOSVersion ? .yangshipin : .cctv
-    @Published private(set) var yangshipinPlayable: Bool = SourceCapability.meetsMinimumOSVersion
+    @Published private(set) var playbackMode: PlaybackMode = SourceCapability.prefersYangshipinLayout ? .yangshipin : .cctv
+    @Published private(set) var yangshipinPlayable: Bool = SourceCapability.prefersYangshipinLayout
     @Published var playbackError: String?
     @Published var isCompareMode = false
     @Published var probeUseSafariUA = true
@@ -330,7 +330,10 @@ final class WebViewModel: NSObject, ObservableObject {
         SourceCapability.probeMediaSourceSupport(in: yangshipinWebView) { [weak self] supported in
             guard let self else { return }
             self.yangshipinPlayable = supported
-            self.diagnostics.log("capability", "yangshipin MSE class \(supported)")
+            self.diagnostics.log(
+                "capability",
+                "yangshipin MSE class \(supported) layout=\(DebugSettings.sourceLayout.rawValue)"
+            )
             if supported {
                 self.enterYangshipinCapabilityMode()
             } else {
@@ -360,7 +363,8 @@ final class WebViewModel: NSObject, ObservableObject {
     }
 
     private func shouldRestoreCctvOnLaunch() -> Bool {
-        guard let id = SourcePreferenceStore.lastChannelId else { return false }
+        guard let id = SourcePreferenceStore.lastChannelId,
+              CCTVCatalog.entry(for: id) != nil else { return false }
         return SourcePreferenceStore.preferredSource(for: id) == .cctv
     }
 

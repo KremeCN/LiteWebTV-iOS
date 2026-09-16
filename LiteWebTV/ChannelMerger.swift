@@ -34,8 +34,10 @@ enum ChannelMerger {
                 usedSlugs.insert(slug)
             }
 
+            // Stable channel identity does not imply a playable CCTV mobile source.
+            let cctvEntry = slug.flatMap { CCTVCatalog.entry(for: $0) }
             var sources: [StreamSource] = [.yangshipin]
-            if slug != nil {
+            if cctvEntry != nil {
                 sources.append(.cctv)
             }
 
@@ -46,7 +48,7 @@ enum ChannelMerger {
                 name: displayName,
                 group: nil,
                 yangshipinDomIndex: item.index,
-                cctvSlug: slug,
+                cctvSlug: cctvEntry?.slug,
                 availableSources: sources,
                 selectedSource: resolveSelectedSource(
                     channelId: channelId,
