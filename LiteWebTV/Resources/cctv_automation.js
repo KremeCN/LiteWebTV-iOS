@@ -45,7 +45,8 @@
                 '.lwtv-cctv-ancestor { transform:none !important; filter:none !important; perspective:none !important; contain:none !important; overflow:visible !important; }',
                 '.lwtv-cctv-ancestor > :not(.lwtv-cctv-ancestor):not(.lwtv-cctv-host):not(script):not(style):not(link) { display:none !important; }',
                 '.lwtv-cctv-host { position:fixed !important; inset:0 !important; margin:0 !important; padding:0 !important; border:0 !important; box-sizing:border-box !important; width:100vw !important; height:100vh !important; max-width:none !important; max-height:none !important; transform:none !important; z-index:9999 !important; background:#000 !important; overflow:hidden !important; }',
-                '.lwtv-cctv-host video[id^="h5player_"] { position:absolute !important; inset:0 !important; margin:0 !important; padding:0 !important; width:100% !important; height:100% !important; max-width:none !important; max-height:none !important; object-fit:contain !important; object-position:50% 50% !important; }'
+                '.lwtv-cctv-host video[id^="h5player_"] { position:absolute !important; inset:0 !important; margin:0 !important; padding:0 !important; width:100% !important; height:100% !important; max-width:none !important; max-height:none !important; object-fit:contain !important; object-position:50% 50% !important; }',
+                '.lwtv-cctv-host video[id^="h5player_"]::-webkit-media-controls, .lwtv-cctv-host video[id^="h5player_"]::-webkit-media-controls-panel, .lwtv-cctv-host video[id^="h5player_"]::-webkit-media-controls-start-playback-button { display:none !important; -webkit-appearance:none !important; opacity:0 !important; }'
             ].join('\n');
             (document.head || document.documentElement).appendChild(style);
         }
@@ -56,6 +57,17 @@
             if (!ancestor.classList.contains('lwtv-cctv-ancestor')) ancestor.classList.add('lwtv-cctv-ancestor');
             ancestor = ancestor.parentElement;
         }
+        tameNativeVideo(video);
+    }
+
+    function tameNativeVideo(video) {
+        if (!video) return;
+        if (video.controls) video.controls = false;
+        if (video.hasAttribute('controls')) video.removeAttribute('controls');
+        if (!video.hasAttribute('playsinline')) video.setAttribute('playsinline', '');
+        if (!video.hasAttribute('webkit-playsinline')) video.setAttribute('webkit-playsinline', '');
+        try { video.disablePictureInPicture = true; } catch (e) { }
+        try { video.disableRemotePlayback = true; } catch (e) { }
     }
 
     function tryPlayVideo() {
@@ -98,7 +110,7 @@
                 childList: true,
                 subtree: true,
                 attributes: true,
-                attributeFilter: ['class']
+                attributeFilter: ['class', 'controls']
             });
         }
         _scheduleRun();
