@@ -274,6 +274,7 @@ final class WebViewModel: NSObject, ObservableObject {
         config.mediaTypesRequiringUserActionForPlayback = []
         config.allowsInlineMediaPlayback = kind == .probe ? probeAllowsInlinePlayback : true
         config.allowsAirPlayForMediaPlayback = kind != .cctv
+        config.allowsPictureInPictureMediaPlayback = kind != .cctv
         config.defaultWebpagePreferences.preferredContentMode = kind == .yangshipin ? .desktop : .mobile
 
         if kind == .cctv {
@@ -305,9 +306,6 @@ final class WebViewModel: NSObject, ObservableObject {
         webView.isOpaque = true
         webView.backgroundColor = .black
         webView.scrollView.backgroundColor = .black
-        if kind == .cctv {
-            webView.allowsPictureInPicturePlayback = false
-        }
         if kind == .probe {
             webView.customUserAgent = probeUseSafariUA ? cctvUserAgent : nil
         }
