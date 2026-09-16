@@ -83,8 +83,6 @@ final class WebViewModel: NSObject, ObservableObject {
     private var yangshipinExtractScript = ""
     private var cctvAutomationScript = ""
     private var cctvProbeScript = ""
-    private var cctvNativeHlsScript = ""
-
     override init() {
         super.init()
         loadScripts()
@@ -216,10 +214,6 @@ final class WebViewModel: NSObject, ObservableObject {
            let content = try? String(contentsOf: url, encoding: .utf8) {
             cctvProbeScript = content
         }
-        if let url = Bundle.main.url(forResource: "cctv_native_hls", withExtension: "js"),
-           let content = try? String(contentsOf: url, encoding: .utf8) {
-            cctvNativeHlsScript = content
-        }
     }
 
     private func configureWebViews() {
@@ -249,11 +243,7 @@ final class WebViewModel: NSObject, ObservableObject {
             )
         }
         if kind == .cctv || kind == .probe {
-            if !cctvNativeHlsScript.isEmpty {
-                controller.addUserScript(
-                    WKUserScript(source: cctvNativeHlsScript, injectionTime: .atDocumentStart, forMainFrameOnly: true)
-                )
-            }
+            // Let the official iOS Service Worker initialize before assigning the CDRM source.
             if kind == .probe {
                 controller.addUserScript(
                     WKUserScript(
@@ -267,6 +257,9 @@ final class WebViewModel: NSObject, ObservableObject {
                 WKUserScript(source: cctvProbeScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
             )
         }
+        // All script-enabled views must opt in once WKAppBoundDomains is declared,
+        // including Yangshipin, otherwise its injected bridge can be denied.
+        config.limitsNavigationsToAppBoundDomains = true
         config.userContentController = controller
         config.mediaTypesRequiringUserActionForPlayback = []
         config.allowsInlineMediaPlayback = kind == .probe ? probeAllowsInlinePlayback : true
