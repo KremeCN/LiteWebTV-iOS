@@ -83,6 +83,7 @@ final class WebViewModel: NSObject, ObservableObject {
     private var yangshipinExtractScript = ""
     private var cctvAutomationScript = ""
     private var cctvProbeScript = ""
+    private var cctvSwCompatScript = ""
     override init() {
         super.init()
         loadScripts()
@@ -214,6 +215,10 @@ final class WebViewModel: NSObject, ObservableObject {
            let content = try? String(contentsOf: url, encoding: .utf8) {
             cctvProbeScript = content
         }
+        if let url = Bundle.main.url(forResource: "cctv_sw_compat", withExtension: "js"),
+           let content = try? String(contentsOf: url, encoding: .utf8) {
+            cctvSwCompatScript = content
+        }
     }
 
     private func configureWebViews() {
@@ -240,6 +245,11 @@ final class WebViewModel: NSObject, ObservableObject {
         if kind == .yangshipin, !yangshipinGateScript.isEmpty {
             controller.addUserScript(
                 WKUserScript(source: yangshipinGateScript, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+            )
+        }
+        if kind == .cctv, !cctvSwCompatScript.isEmpty {
+            controller.addUserScript(
+                WKUserScript(source: cctvSwCompatScript, injectionTime: .atDocumentStart, forMainFrameOnly: true)
             )
         }
         if kind == .cctv || kind == .probe {
@@ -1128,7 +1138,7 @@ extension WebViewModel: WKScriptMessageHandler {
                     }
                 }
                 self.activeDiagnosticDocuments[key, default: []].insert(documentID)
-            } else if self.activeDiagnosticDocuments[key]?.contains(documentID) != true {
+            } else if type != "swCompat", self.activeDiagnosticDocuments[key]?.contains(documentID) != true {
                 self.diagnostics.log("probe", "ignored stale document on \(source)")
                 return
             }
@@ -1198,6 +1208,18 @@ extension WebViewModel: WKScriptMessageHandler {
                 let line = data["line"] as? Int ?? 0
                 let column = data["column"] as? Int ?? 0
                 self.diagnostics.log("page", "error name=\(name) path=\(path) line=\(line):\(column) source=\(source)")
+            case "swCompat":
+                let phase = data["phase"] as? String ?? ""
+                let scanned = data["scanned"] as? Int ?? 0
+                let matched = data["matched"] as? Int ?? 0
+                let unregistered = data["unregistered"] as? Int ?? 0
+                let scope = data["scope"] as? String ?? ""
+                let name = data["name"] as? String ?? ""
+                let message = data["message"] as? String ?? ""
+                self.diagnostics.log(
+                    "sw",
+                    "cctv \(phase) scanned=\(scanned) matched=\(matched) unregistered=\(unregistered) scope=\(scope) name=\(name) message=\(message) frame=\(frame) href=\(href)"
+                )
             case "unhandledRejection":
                 let name = data["name"] as? String ?? "unknown"
                 let message = data["message"] as? String ?? ""
