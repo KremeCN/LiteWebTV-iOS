@@ -29,6 +29,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         SystemVolume.shared.activateSession()
+        SessionBrightness.shared.start()
         return true
     }
 

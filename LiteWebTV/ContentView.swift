@@ -121,9 +121,6 @@ struct ContentView: View {
     @State private var touchStartX: CGFloat = 0
     @State private var touchStartY: CGFloat = 0
 
-    // 亮度
-    @State private var currentBrightness: CGFloat = UIScreen.main.brightness
-
     // 换台 Toast
     @State private var showToast = false
     @State private var toastMessage = ""
@@ -436,7 +433,7 @@ struct ContentView: View {
 
                     if touchStartX < screenWidth * zoneLeftEnd {
                         dragMode = .brightness
-                        adjustIndicatorText = "☀ \(Int(currentBrightness * 100))%"
+                        adjustIndicatorText = "☀ \(Int((SessionBrightness.shared.current * 100).rounded()))%"
                         showAdjustIndicator = true
                     } else if touchStartX > screenWidth * zoneRightStart {
                         dragMode = .volume
@@ -574,9 +571,8 @@ struct ContentView: View {
     }
 
     private func adjustBrightness(_ deltaPercent: CGFloat) {
-        currentBrightness = max(0.01, min(1.0, currentBrightness + deltaPercent))
-        UIScreen.main.brightness = currentBrightness
-        adjustIndicatorText = "☀ \(Int(currentBrightness * 100))%"
+        let next = SessionBrightness.shared.adjust(by: deltaPercent)
+        adjustIndicatorText = "☀ \(Int((next * 100).rounded()))%"
     }
 
     // MARK: - Splash Screen
