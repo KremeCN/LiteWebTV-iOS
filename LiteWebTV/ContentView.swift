@@ -417,6 +417,9 @@ struct ContentView: View {
             touchStartY = value.startLocation.y
             lastDragY = value.startLocation.y
             dragMode = .undecided
+            if touchStartX > geo.size.width * 0.6 {
+                SystemVolume.shared.prepare()
+            }
         }
 
         if dragMode == .undecided {
@@ -437,7 +440,8 @@ struct ContentView: View {
                         showAdjustIndicator = true
                     } else if touchStartX > screenWidth * zoneRightStart {
                         dragMode = .volume
-                        adjustIndicatorText = "🔊 \(SystemVolume.shared.percent)%"
+                        let start = SystemVolume.shared.beginGesture()
+                        adjustIndicatorText = "🔊 \(Int((start * 100).rounded()))%"
                         showAdjustIndicator = true
                     } else {
                         dragMode = .gesture
