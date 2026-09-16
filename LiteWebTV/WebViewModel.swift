@@ -578,11 +578,17 @@ final class WebViewModel: NSObject, ObservableObject {
               let domIndex = pendingYangshipinDomIndex,
               yangshipinWebView.url?.host?.contains("yangshipin.cn") == true,
               !yangshipinWebView.isLoading else { return }
-        pendingYangshipinDomIndex = nil
         diagnostics.log("session", "click yangshipin after unsuspend dom=\(domIndex)")
-        clickYangshipinChannel(domIndex: domIndex)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            self?.yangshipinWebView.evaluateJavaScript("window.extractData()", completionHandler: nil)
+        clickYangshipinChannel(domIndex: domIndex) { [weak self] clicked in
+            guard let self,
+                  self.playbackMode == .yangshipin,
+                  self.pendingYangshipinDomIndex == domIndex else { return }
+            // didFinish 并不保证 SPA 已渲染频道列表；失败时保留请求，列表回传后重试。
+            guard clicked else { return }
+            self.pendingYangshipinDomIndex = nil
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.yangshipinWebView.evaluateJavaScript("window.extractData()", completionHandler: nil)
+            }
         }
     }
 
@@ -632,6 +638,16 @@ final class WebViewModel: NSObject, ObservableObject {
                 }
             }
             applyLogicalChannel(at: currentChannelIndex)
+            return
+        }
+
+        // 重载后的初始列表通常仍选中 CCTV1，不应覆盖尚未执行的用户选台。
+        if playbackMode == .yangshipin, let pendingDomIndex = pendingYangshipinDomIndex {
+            if let listIndex = logicalChannels.firstIndex(where: { $0.yangshipinDomIndex == pendingDomIndex }) {
+                currentChannelIndex = listIndex
+            }
+            updateActiveChannelHighlight()
+            flushPendingYangshipinClick()
             return
         }
 
@@ -787,14 +803,19 @@ final class WebViewModel: NSObject, ObservableObject {
         return targetName
     }
 
-    private func clickYangshipinChannel(domIndex: Int) {
+    private func clickYangshipinChannel(domIndex: Int, completion: @escaping (Bool) -> Void) {
         let js = """
         (function() {
             const items = document.querySelectorAll('.tv-main-con-r-list-left .oveerflow-1');
-            if(items[\(domIndex)]) { items[\(domIndex)].click(); }
+            const item = items[\(domIndex)];
+            if (!item) return false;
+            item.click();
+            return true;
         })();
         """
-        yangshipinWebView.evaluateJavaScript(js, completionHandler: nil)
+        yangshipinWebView.evaluateJavaScript(js) { result, error in
+            completion(error == nil && (result as? Bool) == true)
+        }
     }
 
     func togglePlayPause() {
@@ -1162,9 +1183,14 @@ extension WebViewModel: WKScriptMessageHandler {
                 let isIosDrmFn = data["isIosDrmFn"] as? String ?? ""
                 let videoUrlKind = data["videoUrlKind"] as? String ?? ""
                 let domSrcKind = data["domSrcKind"] as? String ?? ""
+                let worker = data["serviceWorker"] as? [String: Any] ?? [:]
+                let swAvailable = worker["available"] as? Bool ?? false
+                let swControlled = worker["controlled"] as? Bool ?? false
+                let swState = worker["state"] as? String ?? ""
+                let swScript = worker["script"] as? String ?? ""
                 self.diagnostics.log(
                     "player",
-                    "\(source) frame=\(frame) safari=\(safari) iosHttps=\(iosHttps) iosVer=\(iosVer) wasm=\(wasm) mse=\(mse) eme=\(eme) jumpToApp=\(jumpToApp) isDrm=\(isDrm) isIosDrmFlag=\(isIosDrmFlag) isIosDrmFn=\(isIosDrmFn) videoUrlKind=\(videoUrlKind) domSrcKind=\(domSrcKind)"
+                    "\(source) frame=\(frame) safari=\(safari) iosHttps=\(iosHttps) iosVer=\(iosVer) wasm=\(wasm) mse=\(mse) eme=\(eme) jumpToApp=\(jumpToApp) isDrm=\(isDrm) isIosDrmFlag=\(isIosDrmFlag) isIosDrmFn=\(isIosDrmFn) videoUrlKind=\(videoUrlKind) domSrcKind=\(domSrcKind) swAvailable=\(swAvailable) swControlled=\(swControlled) swState=\(swState) swScript=\(swScript)"
                 )
             case "pageError":
                 let name = data["name"] as? String ?? "Error"
@@ -1175,10 +1201,11 @@ extension WebViewModel: WKScriptMessageHandler {
             case "unhandledRejection":
                 let name = data["name"] as? String ?? "unknown"
                 let message = data["message"] as? String ?? ""
+                let videoExists = data["videoExists"] as? Bool ?? false
                 let srcEmpty = data["srcEmpty"] as? Bool ?? false
                 self.diagnostics.log(
                     "page",
-                    "unhandled rejection name=\(name) message=\(message) srcEmpty=\(srcEmpty) source=\(source)"
+                    "unhandled rejection name=\(name) message=\(message) videoExists=\(videoExists) srcEmpty=\(srcEmpty) source=\(source)"
                 )
             default:
                 break
