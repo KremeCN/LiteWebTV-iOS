@@ -7,7 +7,7 @@ final class PlaybackDiagnostics: ObservableObject {
     static var buildID: String {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
-        return "diag-20260916b v\(version)(\(build))"
+        return "diag-20260916c v\(version)(\(build))"
     }
 
     struct Event: Identifiable {

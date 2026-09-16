@@ -164,6 +164,22 @@
         return 'other';
     }
 
+    // Observe only: never register, replace or unregister the site's worker.
+    function serviceWorkerSnapshot() {
+        try {
+            var worker = navigator.serviceWorker && navigator.serviceWorker.controller;
+            var url = worker && worker.scriptURL ? new URL(worker.scriptURL) : null;
+            return {
+                available: !!navigator.serviceWorker,
+                controlled: !!worker,
+                state: worker ? String(worker.state) : '',
+                script: url ? url.origin + url.pathname : ''
+            };
+        } catch (e) {
+            return { available: false, controlled: false, state: 'unavailable', script: '' };
+        }
+    }
+
     function playerBranchSnapshot() {
         var ua = navigator.userAgent || '';
         var appVersion = navigator.appVersion || '';
@@ -174,15 +190,10 @@
         var player = objs.player || {};
         var video = player.video || {};
         var domVideo = firstVideo();
-        var drmFn = '';
-        try {
-            if (typeof isIosDrmPlayer === 'function' && window.playerParas) {
-                drmFn = isIosDrmPlayer(window.playerParas) ? 'true' : 'false';
-            }
-        } catch (e) {
-            drmFn = 'threw';
-        }
+        // Do not call isIosDrmPlayer: it mutates livePlayerObjs.isIosDrm.
+        // Diagnostics must not change the official player's branch selection.
         return {
+            serviceWorker: serviceWorkerSnapshot(),
             safari: safari,
             iosHttps: iosHttps,
             iosVer: matched ? (matched[1] + '.' + matched[2]) : '',
@@ -192,7 +203,7 @@
             jumpToApp: String((player.jumpToApp || (window.playerParas && window.playerParas.jumpToApp) || '')),
             isDrm: !!player.isDrm,
             isIosDrmFlag: !!objs.isIosDrm,
-            isIosDrmFn: drmFn,
+            isIosDrmFn: 'not-invoked',
             videoUrlKind: classifyMediaUrl(video.url || video.liveUrl || ''),
             domSrcKind: classifyMediaUrl(domVideo ? (domVideo.currentSrc || domVideo.src || '') : '')
         };
@@ -257,6 +268,15 @@
         registerDocument('native-commit');
     };
 
+    // Passive lifecycle observation; do not touch register/ready/unregister promises.
+    try {
+        if (navigator.serviceWorker) {
+            navigator.serviceWorker.addEventListener('controllerchange', function () {
+                maybePostBranch(true);
+            });
+        }
+    } catch (e) { }
+
     window.addEventListener('error', function (event) {
         var filePath = '';
         try {
@@ -275,7 +295,8 @@
         post('unhandledRejection', {
             name: reason && reason.name ? String(reason.name) : '',
             message: reason && reason.message ? String(reason.message).slice(0, 80) : '',
-            srcEmpty: !!(video && !(video.currentSrc || video.src))
+            videoExists: !!video,
+            srcEmpty: !video || !(video.currentSrc || video.src)
         });
         maybePostBranch(true);
     });
