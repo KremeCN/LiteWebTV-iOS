@@ -470,6 +470,7 @@ struct ContentView: View {
         if wasAdjusting {
             if dragMode == .volume {
                 SystemVolume.shared.endGesture()
+                viewModel.resumeCctvIfPausedAfterVolume()
             }
             // 松手后 1.5 秒自动隐藏
             hideIndicatorTask?.cancel()

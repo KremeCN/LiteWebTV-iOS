@@ -273,7 +273,29 @@ final class WebViewModel: NSObject, ObservableObject {
         config.userContentController = controller
         config.mediaTypesRequiringUserActionForPlayback = []
         config.allowsInlineMediaPlayback = kind == .probe ? probeAllowsInlinePlayback : true
+        config.allowsAirPlayForMediaPlayback = kind != .cctv
         config.defaultWebpagePreferences.preferredContentMode = kind == .yangshipin ? .desktop : .mobile
+
+        if kind == .cctv {
+            // Hide iOS native media chrome before the official player sets controls.
+            let hideNativeChrome = """
+            (function(){
+                var css = 'video::-webkit-media-controls,video::-webkit-media-controls-panel,video::-webkit-media-controls-enclosure,video::-webkit-media-controls-start-playback-button{display:none!important;-webkit-appearance:none!important;opacity:0!important}';
+                function inject(){
+                    if (document.getElementById('lwtv-cctv-native-chrome')) return;
+                    var style = document.createElement('style');
+                    style.id = 'lwtv-cctv-native-chrome';
+                    style.textContent = css;
+                    (document.head || document.documentElement).appendChild(style);
+                }
+                inject();
+                document.addEventListener('DOMContentLoaded', inject);
+            })();
+            """
+            controller.addUserScript(
+                WKUserScript(source: hideNativeChrome, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+            )
+        }
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
@@ -283,6 +305,9 @@ final class WebViewModel: NSObject, ObservableObject {
         webView.isOpaque = true
         webView.backgroundColor = .black
         webView.scrollView.backgroundColor = .black
+        if kind == .cctv {
+            webView.allowsPictureInPicturePlayback = false
+        }
         if kind == .probe {
             webView.customUserAgent = probeUseSafariUA ? cctvUserAgent : nil
         }
@@ -830,6 +855,22 @@ final class WebViewModel: NSObject, ObservableObject {
         yangshipinWebView.evaluateJavaScript(js) { result, error in
             completion(error == nil && (result as? Bool) == true)
         }
+    }
+
+    /// 手势调系统音量可能打断 WKWebView 原生 HLS；若央视网视频因此暂停则恢复。
+    func resumeCctvIfPausedAfterVolume() {
+        guard playbackMode == .cctv, !isCompareMode else { return }
+        let js = """
+        (function(){
+            var video = document.querySelector('video[id^="h5player_"]') || document.querySelector('video');
+            if (!video || !video.paused) return;
+            var src = video.currentSrc || video.src || '';
+            if (src.length < 8) return;
+            var next = video.play();
+            if (next && typeof next.catch === 'function') next.catch(function(){});
+        })();
+        """
+        cctvWebView.evaluateJavaScript(js, completionHandler: nil)
     }
 
     func togglePlayPause() {

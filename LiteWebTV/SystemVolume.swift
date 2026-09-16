@@ -28,7 +28,6 @@ enum SystemVolume {
 
         @discardableResult
         func adjust(by delta: Float) -> Float {
-            activateSession()
             attachVolumeView()
             let next = min(1, max(0, current + delta))
             slider?.value = next
