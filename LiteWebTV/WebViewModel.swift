@@ -378,7 +378,7 @@ final class WebViewModel: NSObject, ObservableObject {
             if supported {
                 self.enterYangshipinCapabilityMode()
             } else {
-                self.enterCctvOnlyMode(startIndex: 0, markYangshipinUnavailable: true)
+                self.enterCctvOnlyMode(markYangshipinUnavailable: true)
             }
         }
     }
@@ -415,13 +415,21 @@ final class WebViewModel: NSObject, ObservableObject {
         return id
     }
 
-    private func enterCctvOnlyMode(startIndex: Int, markYangshipinUnavailable: Bool = true) {
+    private func restoredCctvCatalogIndex() -> Int {
+        guard let id = SourcePreferenceStore.lastChannelId,
+              let index = CCTVCatalog.channels.firstIndex(where: { $0.slug == id }) else {
+            return 0
+        }
+        return index
+    }
+
+    private func enterCctvOnlyMode(markYangshipinUnavailable: Bool = true) {
         cancelYangshipinBootstrap()
         if markYangshipinUnavailable {
             yangshipinPlayable = false
         }
         playbackMode = .cctv
-        currentChannelIndex = min(max(startIndex, 0), CCTVCatalog.channels.count - 1)
+        currentChannelIndex = restoredCctvCatalogIndex()
         logicalChannels = ChannelMerger.cctvOnlyChannels(activeIndex: currentChannelIndex)
         applyLogicalChannel(at: currentChannelIndex)
     }
@@ -433,7 +441,7 @@ final class WebViewModel: NSObject, ObservableObject {
             guard let self, self.yangshipinBootstrapInProgress else { return }
             if self.logicalChannels.isEmpty {
                 self.diagnostics.log("session", "yangshipin bootstrap timed out")
-                self.enterCctvOnlyMode(startIndex: 0, markYangshipinUnavailable: false)
+                self.enterCctvOnlyMode(markYangshipinUnavailable: false)
             }
         }
         yangshipinBootstrapTimeoutTask = task
@@ -593,6 +601,7 @@ final class WebViewModel: NSObject, ObservableObject {
 
         let channel = logicalChannels[index]
         SourcePreferenceStore.lastChannelId = channel.id
+        SourcePreferenceStore.save(channelId: channel.id, source: channel.selectedSource)
         switch channel.selectedSource {
         case .cctv:
             guard let slug = channel.cctvSlug else { return }
@@ -1038,7 +1047,7 @@ extension WebViewModel: WKNavigationDelegate {
             return
         }
         if webView === yangshipinWebView, yangshipinBootstrapInProgress, logicalChannels.isEmpty {
-            enterCctvOnlyMode(startIndex: 0, markYangshipinUnavailable: false)
+            enterCctvOnlyMode(markYangshipinUnavailable: false)
         }
     }
 
