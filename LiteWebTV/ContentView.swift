@@ -104,7 +104,7 @@ struct ContentView: View {
 
     // 开屏幕布
     @State private var showSplash = true
-    @State private var splashStatusText = SourceCapability.meetsMinimumOSVersion
+    @State private var splashStatusText = SourceCapability.prefersYangshipinLayout
         ? "正在连接云端服务器..."
         : "正在连接央视网..."
     @State private var splashOffset: CGFloat = 0
@@ -132,6 +132,7 @@ struct ContentView: View {
     // 退出确认
     @State private var lastBackTime: Date = .distantPast
     @State private var showDiagnostics = false
+    private let showDebugChrome = DebugSettings.showChrome
 
     // MARK: - Safe Area Helper
     private var realSafeArea: UIEdgeInsets {
@@ -353,21 +354,23 @@ struct ContentView: View {
                     }
                 }
                 Spacer()
-                chromeButton("频道") {
-                    dismissSplashImmediately()
-                    showChannelSidebar = true
-                    showProgramSidebar = false
-                    showDiagnostics = false
-                }
-                chromeButton("节目") {
-                    dismissSplashImmediately()
-                    showProgramSidebar = true
-                    showChannelSidebar = false
-                    showDiagnostics = false
-                }
-                chromeButton("诊断") {
-                    dismissSplashImmediately()
-                    showDiagnostics = true
+                if showDebugChrome {
+                    chromeButton("频道") {
+                        dismissSplashImmediately()
+                        showChannelSidebar = true
+                        showProgramSidebar = false
+                        showDiagnostics = false
+                    }
+                    chromeButton("节目") {
+                        dismissSplashImmediately()
+                        showProgramSidebar = true
+                        showChannelSidebar = false
+                        showDiagnostics = false
+                    }
+                    chromeButton("诊断") {
+                        dismissSplashImmediately()
+                        showDiagnostics = true
+                    }
                 }
             }
             .padding(.horizontal, 16)
@@ -375,7 +378,7 @@ struct ContentView: View {
             Spacer()
         }
         .zIndex(140)
-        .allowsHitTesting(true)
+        .allowsHitTesting(showDebugChrome || viewModel.isCompareMode)
     }
 
     private func chromeButton(_ title: String, action: @escaping () -> Void) -> some View {

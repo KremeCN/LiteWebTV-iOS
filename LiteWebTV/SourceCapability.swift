@@ -20,6 +20,18 @@ enum SourceCapability {
         return false
     }
 
+    /// 当前应走高版本双源布局，还是低版本央视网单源。调试覆盖优先于系统探测。
+    static var prefersYangshipinLayout: Bool {
+        switch DebugSettings.sourceLayout {
+        case .followSystem:
+            return meetsMinimumOSVersion
+        case .dualSource:
+            return true
+        case .cctvOnly:
+            return false
+        }
+    }
+
     /// 在 WKWebView 中探测 MSE 是否可用（需在 WebView 创建后调用）。
     /// 空白页上偶发假阴性时会重试数次。
     static func probeMediaSourceSupport(
@@ -28,6 +40,17 @@ enum SourceCapability {
         retryDelay: TimeInterval = 0.35,
         completion: @escaping (Bool) -> Void
     ) {
+        switch DebugSettings.sourceLayout {
+        case .cctvOnly:
+            completion(false)
+            return
+        case .dualSource:
+            completion(true)
+            return
+        case .followSystem:
+            break
+        }
+
         guard meetsMinimumOSVersion else {
             completion(false)
             return
