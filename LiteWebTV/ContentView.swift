@@ -152,6 +152,7 @@ struct ContentView: View {
 
                 if viewModel.nativePlaybackActive && !viewModel.isCompareMode {
                     NativePlayerView(player: viewModel.nativePlayer.player)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .ignoresSafeArea()
                         .allowsHitTesting(false)
                 }
