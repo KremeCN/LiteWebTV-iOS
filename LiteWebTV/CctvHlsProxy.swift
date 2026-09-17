@@ -19,6 +19,7 @@ final class CctvHlsProxy {
     private var workerWaiters: [(Data?) -> Void] = []
 
     var userAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1"
+    var onLog: ((String) -> Void)?
 
     private init() {
         let config = URLSessionConfiguration.ephemeral
@@ -420,9 +421,24 @@ final class CctvHlsProxy {
         }
     }
 
-    /// CDN 的 RESOLUTION/BANDWIDTH 标签会挂羊头：cctv1 的“1080P”实测只有 360p 的体积，
-    /// 720P 档反而最大。按声明码率选档会被骗，改为实测各档分片字节数选最大。
+    /// CDN 的 RESOLUTION/BANDWIDTH 会挂羊头：cctv1 的“1080P”实测经常只有 360p 体积。
+    /// HEAD+Range 也不可靠（Content-Length=1 或缺字段），会让选档在 360/720 之间乱跳。
     private var measuredVariantCache: [String: (URL, Date)] = [:]
+    private let probeBudget: TimeInterval = 1.2
+    private let cacheTTL: TimeInterval = 60
+
+    private struct VariantProbe {
+        let variant: CctvHlsRewriter.StreamVariant
+        let bytes: Int
+        let duration: Double
+
+        var kbps: Int {
+            let seconds = max(duration, 0.5)
+            return Int((Double(max(bytes, 0)) * 8.0 / seconds / 1000.0).rounded())
+        }
+
+        var usable: Bool { bytes > 8 }
+    }
 
     private func pickBestVariant(
         master: String,
@@ -430,74 +446,150 @@ final class CctvHlsProxy {
         slug: String,
         completion: @escaping (URL?) -> Void
     ) {
-        let variants = CctvHlsRewriter.topVariants(from: master, masterURL: masterURL, limit: 3)
+        let variants = CctvHlsRewriter.variants(from: master, masterURL: masterURL)
         guard !variants.isEmpty else {
             completion(nil)
             return
         }
-        let cacheKey = masterURL.absoluteString
+        let cacheKey = slug + "|" + masterURL.absoluteString
         if let (cached, at) = measuredVariantCache[cacheKey],
-           Date().timeIntervalSince(at) < 180,
-           variants.contains(where: { $0 == cached }) {
+           Date().timeIntervalSince(at) < cacheTTL,
+           variants.contains(where: { $0.uri == cached }) {
+            let age = Int(Date().timeIntervalSince(at))
+            let label = variants.first(where: { $0.uri == cached })?.qualityLabel ?? "?"
+            log("pick slug=\(slug) chosen=\(label) cache-hit age=\(age)s")
             completion(cached)
             return
         }
-        let group = DispatchGroup()
-        var sizes: [Int: Int] = [:]   // index -> measured bytes
+
         let lock = NSLock()
+        var probes: [Int: VariantProbe] = [:]
+        var finished = false
+        let finish: (URL?, String) -> Void = { [weak self] chosen, detail in
+            guard let self else {
+                completion(nil)
+                return
+            }
+            lock.lock()
+            let already = finished
+            finished = true
+            lock.unlock()
+            guard !already else { return }
+            self.log("pick slug=\(slug) \(detail)")
+            if let chosen {
+                self.measuredVariantCache[cacheKey] = (chosen, Date())
+            }
+            completion(chosen)
+        }
+
+        let group = DispatchGroup()
         variants.enumerated().forEach { index, variant in
             group.enter()
-            probeVariantSize(variant, slug: slug) { bytes in
+            probeVariant(variant, slug: slug) { bytes, duration in
                 lock.lock()
-                sizes[index] = bytes
+                probes[index] = VariantProbe(variant: variant, bytes: bytes, duration: duration)
                 lock.unlock()
                 group.leave()
             }
+        }
+
+        queue.asyncAfter(deadline: .now() + probeBudget) { [weak self] in
+            guard let self else { return }
+            lock.lock()
+            let snapshot = probes
+            lock.unlock()
+            let (chosen, detail) = self.chooseVariant(variants: variants, probes: snapshot, timedOut: true)
+            finish(chosen, detail)
         }
         group.notify(queue: queue) { [weak self] in
             guard let self else {
                 completion(nil)
                 return
             }
-            let usable = sizes.filter { $0.value > 0 }
-            guard !usable.isEmpty else {
-                completion(variants.first)
-                return
-            }
-            let bestIndex = usable.max { $0.value < $1.value }?.key
-                ?? variants.indices.first ?? 0
-            let chosen = variants[bestIndex]
-            self.measuredVariantCache[cacheKey] = (chosen, Date())
-            completion(chosen)
+            lock.lock()
+            let snapshot = probes
+            lock.unlock()
+            let (chosen, detail) = self.chooseVariant(variants: variants, probes: snapshot, timedOut: false)
+            finish(chosen, detail)
         }
     }
 
-    /// 拉该档 media playlist，对最后一个分片发 Range 0-0 探测真实大小。
-    private func probeVariantSize(_ variant: URL, slug: String, completion: @escaping (Int) -> Void) {
-        fetch(variant, slug: slug) { [weak self] data, _ in
+    private func chooseVariant(
+        variants: [CctvHlsRewriter.StreamVariant],
+        probes: [Int: VariantProbe],
+        timedOut: Bool
+    ) -> (URL?, String) {
+        let ladder = variants.enumerated().map { index, variant -> String in
+            if let probe = probes[index], probe.usable {
+                return "\(variant.qualityLabel)=\(probe.kbps)kbps/\(probe.bytes)B/\(String(format: "%.1f", probe.duration))s"
+            }
+            if probes[index] != nil {
+                return "\(variant.qualityLabel)=unusable"
+            }
+            return "\(variant.qualityLabel)=pending"
+        }.joined(separator: " ")
+
+        let measured = probes.values.filter { $0.usable }
+        if let best = measured.max(by: { lhs, rhs in
+            if lhs.kbps != rhs.kbps { return lhs.kbps < rhs.kbps }
+            return CctvHlsRewriter.fallbackScore(for: lhs.variant) < CctvHlsRewriter.fallbackScore(for: rhs.variant)
+        }) {
+            let method = timedOut ? "measured-timeout" : "measured"
+            let detail = "chosen=\(best.variant.qualityLabel) \(best.kbps)kbps \(best.bytes)B/\(String(format: "%.1f", best.duration))s \(method) | \(ladder)"
+            return (best.variant.uri, detail)
+        }
+
+        let fallback = variants.max(by: {
+            CctvHlsRewriter.fallbackScore(for: $0) < CctvHlsRewriter.fallbackScore(for: $1)
+        })
+        let method = timedOut ? "heuristic-timeout" : "heuristic"
+        let label = fallback?.qualityLabel ?? "none"
+        return (fallback?.uri, "chosen=\(label) \(method) | \(ladder)")
+    }
+
+    /// 拉 media playlist，对倒数第二片发 GET Range，用 Content-Range 总量当真实体积。
+    private func probeVariant(
+        _ variant: CctvHlsRewriter.StreamVariant,
+        slug: String,
+        completion: @escaping (Int, Double) -> Void
+    ) {
+        fetch(variant.uri, slug: slug, timeout: 1.0) { [weak self] data, _ in
             guard let self,
                   let data, let text = String(data: data, encoding: .utf8),
-                  let segment = CctvHlsRewriter.lastSegmentURI(from: text, mediaURL: variant) else {
-                completion(0)
+                  let segment = CctvHlsRewriter.probeSegment(from: text, mediaURL: variant.uri) else {
+                completion(0, 0)
                 return
             }
-            var request = URLRequest(url: segment)
+            var request = URLRequest(url: segment.uri)
+            request.timeoutInterval = 1.0
+            request.httpMethod = "GET"
             request.setValue(self.userAgent, forHTTPHeaderField: "User-Agent")
             request.setValue(CctvNativeCatalog.referer(for: slug).absoluteString, forHTTPHeaderField: "Referer")
             request.setValue("https://tv.cctv.com", forHTTPHeaderField: "Origin")
             request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
-            request.httpMethod = "HEAD"
-            self.session.dataTask(with: request) { _, response, _ in
-                let http = response as? HTTPURLResponse
-                var bytes = http?.value(forHTTPHeaderField: "Content-Length").flatMap { Int($0) } ?? 0
-                if bytes <= 0, let contentRange = http?.value(forHTTPHeaderField: "Content-Range") {
-                    // bytes 0-0/423752 → 423752
-                    if let slash = contentRange.lastIndex(of: "/") {
-                        bytes = Int(contentRange[contentRange.index(after: slash)...]) ?? 0
-                    }
-                }
-                completion(bytes > 0 ? bytes : 0)
+            self.session.dataTask(with: request) { data, response, _ in
+                let bytes = self.totalBytes(from: response as? HTTPURLResponse, bodyCount: data?.count ?? 0)
+                completion(bytes, segment.duration)
             }.resume()
+        }
+    }
+
+    private func totalBytes(from http: HTTPURLResponse?, bodyCount: Int) -> Int {
+        guard let http else { return bodyCount > 8 ? bodyCount : 0 }
+        if let contentRange = http.value(forHTTPHeaderField: "Content-Range"),
+           let slash = contentRange.lastIndex(of: "/") {
+            let total = Int(contentRange[contentRange.index(after: slash)...]) ?? 0
+            if total > 8 { return total }
+        }
+        let length = http.value(forHTTPHeaderField: "Content-Length").flatMap(Int.init) ?? 0
+        if length > 8 { return length }
+        if bodyCount > 8 { return bodyCount }
+        return 0
+    }
+
+    private func log(_ message: String) {
+        DispatchQueue.main.async { [weak self] in
+            self?.onLog?(message)
         }
     }
 
@@ -534,8 +626,9 @@ final class CctvHlsProxy {
         }
     }
 
-    private func fetch(_ url: URL, slug: String, completion: @escaping (Data?, String?) -> Void) {
+    private func fetch(_ url: URL, slug: String, timeout: TimeInterval = 15, completion: @escaping (Data?, String?) -> Void) {
         var request = URLRequest(url: url)
+        request.timeoutInterval = timeout
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         request.setValue(CctvNativeCatalog.referer(for: slug).absoluteString, forHTTPHeaderField: "Referer")
         request.setValue("https://tv.cctv.com", forHTTPHeaderField: "Origin")
