@@ -2,9 +2,21 @@ import Foundation
 
 enum CctvHlsRewriter {
     static func selectHighestVariant(from master: String, masterURL: URL) -> URL? {
-        var bestBandwidth = -1
-        var bestURI: String?
+        let variants = allVariants(from: master, masterURL: masterURL)
+        return variants.first?.uri
+    }
+
+    /// 按声明码率降序返回前 limit 个 variant（保留 URL 而不是只挑一个）。
+    /// CDN 的分辨率标签不可信，调用方要实测分片大小再定档。
+    static func topVariants(from master: String, masterURL: URL, limit: Int) -> [URL] {
+        allVariants(from: master, masterURL: masterURL)
+            .prefix(limit)
+            .map(\.uri)
+    }
+
+    private static func allVariants(from master: String, masterURL: URL) -> [(bandwidth: Int, uri: URL)] {
         let lines = master.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var found: [(Int, URL)] = []
         var index = 0
         while index < lines.count {
             let trimmed = lines[index].trimmingCharacters(in: .whitespaces)
@@ -19,17 +31,29 @@ enum CctvHlsRewriter {
                     uriLine = candidate
                     break
                 }
-                if !uriLine.isEmpty, bandwidth >= bestBandwidth {
-                    bestBandwidth = bandwidth
-                    bestURI = uriLine
+                if !uriLine.isEmpty, let uri = resolve(uriLine, against: masterURL) {
+                    found.append((bandwidth, uri))
                 }
                 index = cursor
                 continue
             }
             index += 1
         }
-        guard let bestURI else { return nil }
-        return resolve(bestURI, against: masterURL)
+        return found.sorted { $0.0 > $1.0 }.map { (bandwidth: $0.0, uri: $0.1) }
+    }
+
+    /// media playlist 中最后一个分片的绝对地址，用于实测该档码率。
+    static func lastSegmentURI(from playlist: String, mediaURL: URL) -> URL? {
+        let lines = playlist.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var last: String?
+        for raw in lines.reversed() {
+            let trimmed = raw.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
+            last = trimmed
+            break
+        }
+        guard let last else { return nil }
+        return resolve(last, against: mediaURL)
     }
 
     static func rewriteMediaPlaylist(_ playlist: String, mediaURL: URL, segmentProxy: (URL) -> String) -> String {
