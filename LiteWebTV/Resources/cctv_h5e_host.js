@@ -38,19 +38,17 @@
                 }
                 markReady();
             });
-            return;
         }
-        if (moduleInstance && moduleInstance.calledRun && moduleInstance.asm && typeof moduleInstance.asm.aa === 'function') {
-            markReady();
-            return;
-        }
-        var prev = moduleInstance && moduleInstance.onRuntimeInitialized;
-        if (moduleInstance) {
-            moduleInstance.onRuntimeInitialized = function () {
-                if (typeof prev === 'function') prev();
+        function pollExports() {
+            if (ready) return;
+            var asm = moduleInstance && moduleInstance.asm;
+            if (asm && typeof asm.aa === 'function') {
                 markReady();
-            };
+                return;
+            }
+            setTimeout(pollExports, 50);
         }
+        pollExports();
     }
 
     function heap() {
