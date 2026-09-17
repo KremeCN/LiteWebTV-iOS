@@ -4,9 +4,9 @@
     var PAGE_HOST = 'https://tv.cctv.com';
     // NativeWasmTv / 官网直播播放器的 media tag，是 H5E 密钥状态的一部分。
     var MEDIA_TAG = 'h5player_player';
+    var TAG_EXTEND = 2048;
     // jsdec 输出函数把分配块尾部当变换 scratch：合法 slice 需要接近 2 MiB。
-    // 2 KiB 尾距会在大 slice 上确定性越界 trap（NativeWasmTv 同款注释）。
-    var MEMORY_EXTEND = 2 * 1024 * 1024;
+    var NAL_MEMORY_EXTEND = 2 * 1024 * 1024;
     var moduleInstance = null;
     var ready = false;
     var sessionBegin = false;
@@ -61,8 +61,8 @@
     }
 
     function allocTag(tag) {
-        var memory = moduleInstance._jsmalloc(tag.length + MEMORY_EXTEND);
-        heap().fill(0, memory, memory + tag.length + MEMORY_EXTEND);
+        var memory = moduleInstance._jsmalloc(tag.length + TAG_EXTEND);
+        heap().fill(0, memory, memory + tag.length + TAG_EXTEND);
         var i;
         for (i = 0; i < tag.length; i++) {
             heap()[memory + i] = tag.charCodeAt(i);
@@ -155,12 +155,11 @@
         var type = nal[0] & 0x1f;
         if (type === 25) {
             shouldDecrypt = nal.length > 1 && nal[1] === 1;
+            return Uint8Array.from(nal);
         }
-        // cdrmld 把 SPS/PPS 一并加密；只解 1/5 会留下 1280x176 这种假尺寸，VideoToolbox 纯黑。
-        if (!shouldDecrypt) return null;
 
         updatePlayer();
-        var addr = moduleInstance._jsmalloc(nal.byteLength + PAGE_HOST.length + MEMORY_EXTEND);
+        var addr = moduleInstance._jsmalloc(nal.byteLength + PAGE_HOST.length + NAL_MEMORY_EXTEND);
         var mem = heap();
         mem.set(nal, addr);
         var hi;
@@ -181,10 +180,12 @@
         var decryptedLength = typeof finish === 'function'
             ? finish(playerArg, addr, nal.byteLength, PAGE_HOST.length)
             : 0;
+        if (!decryptedLength || decryptedLength > nal.byteLength + PAGE_HOST.length + NAL_MEMORY_EXTEND) {
+            moduleInstance._jsfree(addr);
+            return null;
+        }
         var out = Uint8Array.from(heap().subarray(addr, addr + decryptedLength));
         moduleInstance._jsfree(addr);
-        // CCTV 把 SPS constraint byte 的 reserved_zero_2bits 用作私有加密标记。
-        // FFmpeg 忽略它，VideoToolbox 可能拒绝整个流；输出前清洗掉。
         if (type === 7 && out.length >= 3) {
             out[2] = out[2] & 0xfc;
         }
@@ -212,9 +213,69 @@
         return starts;
     }
 
-    function decryptPES(data, map, ts, stats) {
+    function writePES(ts, slots, headerPacket, headerOff, headerLen, packetLen, bytes, stats) {
+        var consumed = 0;
+        var total = 0;
+        var s;
+        for (s = 0; s < slots.length; s++) total += slots[s].len;
+        if (bytes.length > total) {
+            stats.skipped += 1;
+            return false;
+        }
+        for (s = 0; s < slots.length; s++) {
+            var slot = slots[s];
+            var packet = slot.packet;
+            var available = bytes.length - consumed;
+            if (available >= slot.len) {
+                ts.set(bytes.subarray(consumed, consumed + slot.len), packet + slot.off);
+                consumed += slot.len;
+                continue;
+            }
+            if (available > 0) {
+                var adaptationLength = 183 - available;
+                ts[packet + 3] = (ts[packet + 3] & 0xcf) | 0x30;
+                ts[packet + 4] = adaptationLength;
+                if (adaptationLength > 0) {
+                    ts[packet + 5] = 0;
+                    if (adaptationLength > 1) {
+                        ts.fill(0xff, packet + 6, packet + 6 + adaptationLength - 1);
+                    }
+                }
+                ts.set(bytes.subarray(consumed, consumed + available), packet + 188 - available);
+                consumed += available;
+            } else {
+                ts[packet + 3] = (ts[packet + 3] & 0xcf) | 0x30;
+                ts[packet + 4] = 183;
+                ts[packet + 5] = 0;
+                ts.fill(0xff, packet + 6, packet + 188);
+            }
+        }
+        if (consumed !== bytes.length) {
+            stats.skipped += 1;
+            return false;
+        }
+        if (packetLen > 0 && headerLen >= 6 && packetLen >= headerLen - 6) {
+            var updated = bytes.length + headerLen - 6;
+            if (updated <= 0xffff) {
+                ts[headerPacket + headerOff + 4] = (updated >> 8) & 0xff;
+                ts[headerPacket + headerOff + 5] = updated & 0xff;
+            }
+        }
+        stats.changed += bytes.length;
+        return true;
+    }
+
+    function decryptPES(data, slots, ts, headerPacket, headerOff, headerLen, packetLen, stats) {
         var starts = findStartCodes(data);
+        if (!starts.length) return;
+        var pieces = [];
+        var total = 0;
         var n;
+        var lead = starts[0].nal - starts[0].code;
+        if (lead > 0) {
+            pieces.push(data.subarray(0, lead));
+            total += lead;
+        }
         for (n = 0; n < starts.length; n++) {
             var from = starts[n].nal;
             var to = n + 1 < starts.length ? starts[n + 1].nal - starts[n + 1].code : data.length;
@@ -225,18 +286,26 @@
             } catch (err) {
                 throw err;
             }
-            if (!decrypted) continue;
-            stats.nals += 1;
-            if (decrypted.length !== (to - from)) {
+            // 解失败就整段 PES 原样留下，避免明文和密文拼在一起变成绿点花屏。
+            if (!decrypted) {
                 stats.skipped += 1;
-                continue;
+                return;
             }
-            var offset;
-            for (offset = 0; offset < decrypted.length; offset++) {
-                if (ts[map[from + offset]] !== decrypted[offset]) stats.changed += 1;
-                ts[map[from + offset]] = decrypted[offset];
-            }
+            stats.nals += 1;
+            var prefix = starts[n].code === 4
+                ? new Uint8Array([0, 0, 0, 1])
+                : new Uint8Array([0, 0, 1]);
+            pieces.push(prefix, decrypted);
+            total += prefix.length + decrypted.length;
         }
+        if (!pieces.length) return;
+        var rebuilt = new Uint8Array(total);
+        var off = 0;
+        for (n = 0; n < pieces.length; n++) {
+            rebuilt.set(pieces[n], off);
+            off += pieces[n].length;
+        }
+        writePES(ts, slots, headerPacket, headerOff, headerLen, packetLen, rebuilt, stats);
     }
 
     function isVideoPES(streamId) {
@@ -249,33 +318,46 @@
             return ts;
         }
         var pes = [];
-        var map = [];
+        var slots = [];
         var activePid = -1;
-        // 段尾被截断的 PES 不能半解：部分重写的帧会产生上半屏花屏。
         var pesHeaderLen = 0;
         var pesPacketLen = 0;
+        var headerPacket = 0;
+        var headerOff = 0;
         function flush() {
             if (!pes.length) {
                 activePid = -1;
                 pesHeaderLen = 0;
                 pesPacketLen = 0;
+                slots = [];
                 return;
             }
             if (pesPacketLen > 0 && pesHeaderLen >= 6 && pesPacketLen >= pesHeaderLen - 6) {
                 var expected = pesPacketLen - (pesHeaderLen - 6);
                 if (pes.length < expected) {
-                    // 截断：整段 PES 原样输出，不解。
                     pes = [];
-                    map = [];
+                    slots = [];
                     activePid = -1;
                     pesHeaderLen = 0;
                     pesPacketLen = 0;
                     return;
                 }
+                if (pes.length > expected) {
+                    var remain = expected;
+                    var trimmed = [];
+                    var s;
+                    for (s = 0; s < slots.length && remain > 0; s++) {
+                        var take = Math.min(slots[s].len, remain);
+                        trimmed.push({ packet: slots[s].packet, off: slots[s].off, len: take });
+                        remain -= take;
+                    }
+                    slots = trimmed;
+                    pes = pes.slice(0, expected);
+                }
             }
-            decryptPES(Uint8Array.from(pes), map, ts, stats);
+            decryptPES(Uint8Array.from(pes), slots, ts, headerPacket, headerOff, pesHeaderLen, pesPacketLen, stats);
             pes = [];
-            map = [];
+            slots = [];
             activePid = -1;
             pesHeaderLen = 0;
             pesPacketLen = 0;
@@ -301,15 +383,19 @@
                 }
                 flush();
                 activePid = pid;
+                headerPacket = packet;
+                headerOff = cursor - packet;
                 pesPacketLen = (ts[cursor + 4] << 8) | ts[cursor + 5];
                 pesHeaderLen = 9 + ts[cursor + 8];
                 cursor += pesHeaderLen;
             } else if (pid !== activePid) {
                 continue;
             }
-            for (; cursor < end; cursor++) {
-                pes.push(ts[cursor]);
-                map.push(cursor);
+            if (cursor < end) {
+                slots.push({ packet: packet, off: cursor - packet, len: end - cursor });
+                for (; cursor < end; cursor++) {
+                    pes.push(ts[cursor]);
+                }
             }
         }
         flush();
@@ -374,26 +460,27 @@
             return 'ok';
         },
         decryptInbox: function (id) {
-            if (!ready || !sessionBegin) return Promise.resolve('not-ready');
+            if (!ready) return Promise.resolve('not-ready');
             var frozen = originNow();
             Date.now = function () { return frozen; };
+            try {
+                // UpdatePlayer 连续跑几个分片后 VMP 会错；NativeWasmTv 每个 TS 都 Uninit+Init。
+                startSession();
+            } catch (err) {
+                Date.now = originNow;
+                return Promise.resolve('drop:reset ' + String(err) + ' last=' + (window.__lwtvH5eLastFetch || ''));
+            }
+            if (!window.__lwtvH5eConfigLoaded) {
+                Date.now = originNow;
+                return Promise.resolve('drop:noconfig last=' + (window.__lwtvH5eLastFetch || '') +
+                    ' pending=' + (window.__lwtvH5ePendingFetch || 0));
+            }
             var url = 'http://127.0.0.1:' + (window.__lwtvH5ePort || location.port) + '/inbox/' + id;
             return fetch(url).then(function (res) {
                 if (!res.ok) throw new Error('inbox');
                 return res.arrayBuffer();
             }).then(function (buf) {
                 var stats = { nals: 0, changed: 0, skipped: 0 };
-                if (!window.__lwtvH5eConfigLoaded) {
-                    return fetch('http://127.0.0.1:' + (window.__lwtvH5ePort || location.port) + '/outbox/' + id, {
-                        method: 'PUT',
-                        headers: { 'Content-Type': 'application/octet-stream' },
-                        body: buf
-                    }).then(function (res) {
-                        Date.now = originNow;
-                        if (!res.ok) return 'put';
-                        return 'ok nals=0 changed=0 skipped=0 tag=noconfig last=' + (window.__lwtvH5eLastFetch || '');
-                    });
-                }
                 var out = decryptTS(buf, stats);
                 return fetch('http://127.0.0.1:' + (window.__lwtvH5ePort || location.port) + '/outbox/' + id, {
                     method: 'PUT',

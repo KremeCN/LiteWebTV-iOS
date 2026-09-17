@@ -14,7 +14,8 @@
     }
 
     function isConfigURL(url) {
-        return String(url || '').toLowerCase().indexOf('h5player') >= 0;
+        var text = String(url || '').toLowerCase();
+        return text.indexOf('h5player') >= 0 || text.indexOf('blob:') === 0;
     }
 
     function rewrite(url) {
@@ -30,9 +31,20 @@
 
     var origEval = window.eval;
     window.eval = function (code) {
-        if (code === 'self.location.host' || code === 'location.host') return 'tv.cctv.com';
-        if (code === 'self.location.protocol' || code === 'location.protocol') return 'https:';
-        if (code === 'self.location.href' || code === 'location.href') return 'https://tv.cctv.com/live/cctv1/';
+        // NativeWasmTv 的 asm-const 返回值：空 host + blob: 才能让 InitPlayer 发出 fetch。
+        // 伪装成 tv.cctv.com 会被 wasm 域名表跳过，表现为 patched=1 但 pending=0 / last=boot。
+        if (code === 'self.location.host' || code === 'location.host') {
+            window.__lwtvH5eLastFetch = (window.__lwtvH5eLastFetch || '') + '|eh';
+            return '';
+        }
+        if (code === 'self.location.protocol' || code === 'location.protocol') {
+            window.__lwtvH5eLastFetch = (window.__lwtvH5eLastFetch || '') + '|ep';
+            return 'blob:';
+        }
+        if (code === 'self.location.href' || code === 'location.href') {
+            window.__lwtvH5eLastFetch = (window.__lwtvH5eLastFetch || '') + '|er';
+            return 'blob:https://tv.cctv.com/5bca710b-9f02-41f0-a9f1-102bbc65192a';
+        }
         return origEval(code);
     };
 
@@ -55,7 +67,9 @@
                     'http://tv.cctv.com/Library/H5player.json',
                     location.origin + '/Library/H5player.json',
                     '/Library/H5player.json',
-                    'H5player.json'
+                    'H5player.json',
+                    'blob://Library/H5player.json',
+                    'blob:////Library/H5player.json'
                 ].forEach(function (key) {
                     try { store.put(payload, key); } catch (err) {}
                 });
