@@ -15,7 +15,7 @@
 
     function isConfigURL(url) {
         var text = String(url || '').toLowerCase();
-        return text.indexOf('h5player') >= 0 || text.indexOf('blob:') === 0;
+        return text.indexOf('h5player') >= 0 || text.indexOf('/library/') >= 0 || text.indexOf('blob:') === 0;
     }
 
     function rewrite(url) {
@@ -31,19 +31,12 @@
 
     var origEval = window.eval;
     window.eval = function (code) {
-        // NativeWasmTv 的 asm-const 返回值：空 host + blob: 才能让 InitPlayer 发出 fetch。
-        // 伪装成 tv.cctv.com 会被 wasm 域名表跳过，表现为 patched=1 但 pending=0 / last=boot。
-        if (code === 'self.location.host' || code === 'location.host') {
-            window.__lwtvH5eLastFetch = (window.__lwtvH5eLastFetch || '') + '|eh';
-            return '';
-        }
-        if (code === 'self.location.protocol' || code === 'location.protocol') {
-            window.__lwtvH5eLastFetch = (window.__lwtvH5eLastFetch || '') + '|ep';
-            return 'blob:';
-        }
-        if (code === 'self.location.href' || code === 'location.href') {
-            window.__lwtvH5eLastFetch = (window.__lwtvH5eLastFetch || '') + '|er';
-            return 'blob:https://tv.cctv.com/5bca710b-9f02-41f0-a9f1-102bbc65192a';
+        // 只记日志，不改返回值。隐藏页就在 127.0.0.1，InitPlayer 会拼
+        // http://127.0.0.1:<port>/Library/H5player.json，本地代理本来就在提供这份 JSON。
+        // 空 host / blob: 会让 wasm 在 eval protocol 之前短路，表现为 ep 缺失、pending=0。
+        var text = String(code || '');
+        if (text.indexOf('location') >= 0) {
+            window.__lwtvH5eLastFetch = (window.__lwtvH5eLastFetch || '') + '|ev:' + text.replace(/\s+/g, '');
         }
         return origEval(code);
     };
@@ -67,9 +60,7 @@
                     'http://tv.cctv.com/Library/H5player.json',
                     location.origin + '/Library/H5player.json',
                     '/Library/H5player.json',
-                    'H5player.json',
-                    'blob://Library/H5player.json',
-                    'blob:////Library/H5player.json'
+                    'H5player.json'
                 ].forEach(function (key) {
                     try { store.put(payload, key); } catch (err) {}
                 });
