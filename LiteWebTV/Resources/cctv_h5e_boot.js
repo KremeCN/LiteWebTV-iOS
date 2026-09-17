@@ -3,9 +3,11 @@
 
     var H5PLAYER_JSON = '{"h5player":{"ver":20190904,"md5":"c7ed5a71dbe4dee1a2ba171f660ee98d","BTime":"2019-09-04-20:25:10"}}';
 
-    window.__lwtvH5eConfigLoaded = false;
-    window.__lwtvH5eLastFetch = '';
-    window.__lwtvH5eModule = null;
+    window.__lwtvH5eBoot = 1;
+    window.__lwtvH5eWrap = 0;
+    window.__lwtvH5eConfigLoaded = window.__lwtvH5eConfigLoaded || false;
+    window.__lwtvH5eLastFetch = window.__lwtvH5eLastFetch || 'boot';
+    window.__lwtvH5eModule = window.__lwtvH5eModule || null;
 
     function markConfig() {
         window.__lwtvH5eConfigLoaded = true;
@@ -15,12 +17,64 @@
         return String(url || '').toLowerCase().indexOf('h5player') >= 0;
     }
 
+    function rewrite(url) {
+        try {
+            var parsed = new URL(String(url), location.href);
+            var path = parsed.pathname;
+            if (path.indexOf('/Library/') === 0 || path.indexOf('/library/') === 0) {
+                return location.origin + path + parsed.search;
+            }
+        } catch (err) {}
+        return url;
+    }
+
     var origEval = window.eval;
     window.eval = function (code) {
         if (code === 'self.location.host' || code === 'location.host') return 'tv.cctv.com';
         if (code === 'self.location.protocol' || code === 'location.protocol') return 'https:';
         if (code === 'self.location.href' || code === 'location.href') return 'https://tv.cctv.com/live/cctv1/';
         return origEval(code);
+    };
+
+    function seedIDB() {
+        if (!window.indexedDB) return;
+        try {
+            var req = indexedDB.open('emscripten_filesystem', 1);
+            req.onupgradeneeded = function (event) {
+                var db = event.target.result;
+                if (!db.objectStoreNames.contains('FILES')) db.createObjectStore('FILES');
+            };
+            req.onsuccess = function (event) {
+                var db = event.target.result;
+                if (!db.objectStoreNames.contains('FILES')) return;
+                var payload = new TextEncoder().encode(H5PLAYER_JSON);
+                var tx = db.transaction('FILES', 'readwrite');
+                var store = tx.objectStore('FILES');
+                [
+                    'https://tv.cctv.com/Library/H5player.json',
+                    'http://tv.cctv.com/Library/H5player.json',
+                    location.origin + '/Library/H5player.json',
+                    '/Library/H5player.json',
+                    'H5player.json'
+                ].forEach(function (key) {
+                    try { store.put(payload, key); } catch (err) {}
+                });
+            };
+        } catch (err) {}
+    }
+    seedIDB();
+
+    var origOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function (method, url) {
+        var next = typeof url === 'string' ? rewrite(url) : url;
+        arguments[1] = next;
+        window.__lwtvH5eLastFetch = String(next);
+        if (isConfigURL(next)) {
+            this.addEventListener('loadend', function () {
+                if (this.status === 0 || (this.status >= 200 && this.status < 300)) markConfig();
+            });
+        }
+        return origOpen.apply(this, arguments);
     };
 
     function readCString(memory, ptr) {
@@ -83,7 +137,11 @@
         if (!env || env.__lwtvWrapped) return;
         env.__lwtvWrapped = true;
         var orig = env.q;
-        if (typeof orig !== 'function') return;
+        window.__lwtvH5eWrap = typeof orig === 'function' ? 1 : 0;
+        if (typeof orig !== 'function') {
+            window.__lwtvH5eLastFetch = (window.__lwtvH5eLastFetch || '') + '|no-q';
+            return;
+        }
         env.q = function (ptr) {
             var url = '';
             try {
@@ -111,5 +169,13 @@
             if (imports && imports.env) wrapEnv(imports.env);
             return origStreaming(source, imports);
         };
+    }
+    if (WebAssembly.Instance) {
+        var OrigInstance = WebAssembly.Instance;
+        WebAssembly.Instance = function (module, imports) {
+            if (imports && imports.env) wrapEnv(imports.env);
+            return new OrigInstance(module, imports);
+        };
+        WebAssembly.Instance.prototype = OrigInstance.prototype;
     }
 })();

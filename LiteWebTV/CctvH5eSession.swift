@@ -107,6 +107,15 @@ final class CctvH5eSession: NSObject, WKNavigationDelegate {
         config.processPool = WKProcessPool()
         // InitPlayer 先走 emscripten IndexedDB，再 XHR。nonPersistent 上 IDB 打不开就会跳过密钥文件。
         config.websiteDataStore = .default()
+        if let url = Bundle.main.url(forResource: "cctv_h5e_boot", withExtension: "js"),
+           let source = try? String(contentsOf: url, encoding: .utf8),
+           !source.isEmpty {
+            config.userContentController.addUserScript(
+                WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+            )
+        } else {
+            onLog?("boot script missing from bundle")
+        }
         let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 16, height: 16), configuration: config)
         webView.isOpaque = false
         webView.backgroundColor = .clear

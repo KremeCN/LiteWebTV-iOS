@@ -40,7 +40,7 @@
             });
             return;
         }
-        if (moduleInstance && (moduleInstance._CNTV_InitPlayer || moduleInstance.calledRun)) {
+        if (moduleInstance && moduleInstance.calledRun && moduleInstance.asm && typeof moduleInstance.asm.aa === 'function') {
             markReady();
             return;
         }
@@ -249,8 +249,13 @@
         shouldDecrypt = true;
         vmpTag = '';
         releasePlayerArg();
-        initPlayer();
-        sessionBegin = true;
+        try {
+            initPlayer();
+            sessionBegin = true;
+        } catch (err) {
+            window.__lwtvH5eLastFetch = (window.__lwtvH5eLastFetch || '') + '|init-err:' + err;
+            throw err;
+        }
     }
 
     function stopSession() {
@@ -265,19 +270,21 @@
     window.__lwtvH5e = {
         isReady: function () { return ready && typeof CNTVModule === 'function'; },
         start: function () {
-            window.__lwtvH5eConfigLoaded = false;
-            startSession();
+            try {
+                startSession();
+            } catch (err) {
+                return Promise.resolve('start-err ' + String(err) + ' last=' + (window.__lwtvH5eLastFetch || ''));
+            }
             return new Promise(function (resolve) {
                 var n = 0;
                 var timer = setInterval(function () {
                     n += 1;
                     if (window.__lwtvH5eConfigLoaded || n >= 80) {
                         clearInterval(timer);
-                        if (window.__lwtvH5eConfigLoaded) {
-                            resolve('ok');
-                            return;
-                        }
-                        resolve('ok-timeout last=' + (window.__lwtvH5eLastFetch || ''));
+                        var diag = ' last=' + (window.__lwtvH5eLastFetch || '') +
+                            ' boot=' + (window.__lwtvH5eBoot ? '1' : '0') +
+                            ' wrap=' + (window.__lwtvH5eWrap ? '1' : '0');
+                        resolve((window.__lwtvH5eConfigLoaded ? 'ok' : 'ok-timeout') + diag);
                     }
                 }, 50);
             });
@@ -296,6 +303,17 @@
                 return res.arrayBuffer();
             }).then(function (buf) {
                 var stats = { nals: 0, changed: 0, skipped: 0 };
+                if (!window.__lwtvH5eConfigLoaded) {
+                    return fetch('http://127.0.0.1:' + (window.__lwtvH5ePort || location.port) + '/outbox/' + id, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/octet-stream' },
+                        body: buf
+                    }).then(function (res) {
+                        Date.now = originNow;
+                        if (!res.ok) return 'put';
+                        return 'ok nals=0 changed=0 skipped=0 tag=noconfig last=' + (window.__lwtvH5eLastFetch || '');
+                    });
+                }
                 var out = decryptTS(buf, stats);
                 return fetch('http://127.0.0.1:' + (window.__lwtvH5ePort || location.port) + '/outbox/' + id, {
                     method: 'PUT',

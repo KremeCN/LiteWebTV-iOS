@@ -14,6 +14,9 @@ final class CctvHlsProxy {
     private var currentSlug = "cctv1"
     private var decryptor: CctvH5eSession?
     private let session: URLSession
+    private var patchedWorker: Data?
+    private var workerLoading = false
+    private var workerWaiters: [(Data?) -> Void] = []
 
     var userAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1"
 
@@ -53,6 +56,7 @@ final class CctvHlsProxy {
         guard port != 0 else {
             throw ProxyError.listenFailed
         }
+        preloadWorker()
     }
 
     func stop() {
@@ -217,6 +221,10 @@ final class CctvHlsProxy {
             serveH5eHTML(connection)
             return
         }
+        if path == "/live.worker.js" {
+            serveWorker(connection)
+            return
+        }
         if path.lowercased().hasPrefix("/library/") {
             serveLibrary(path, connection: connection)
             return
@@ -254,12 +262,87 @@ final class CctvHlsProxy {
         return ""
     }
 
+    private func fetchHookScript() -> String {
+        if let url = Bundle.main.url(forResource: "cctv_h5e_fetch_hook", withExtension: "js"),
+           let data = try? Data(contentsOf: url),
+           let text = String(data: data, encoding: .utf8) {
+            return text
+        }
+        return ""
+    }
+
+    static func patchLiveWorker(_ data: Data, hook: String) -> Data {
+        guard !hook.isEmpty,
+              var text = String(data: data, encoding: .isoLatin1) else {
+            return data
+        }
+        let needle = "asmLibraryArg={$:abort"
+        guard let range = text.range(of: needle) else {
+            return data
+        }
+        text.replaceSubrange(range, with: hook + needle)
+        guard let patched = text.data(using: .isoLatin1) else {
+            return data
+        }
+        return patched
+    }
+
+    private func preloadWorker() {
+        queue.async { [weak self] in
+            self?.ensureWorker { _ in }
+        }
+    }
+
+    private func ensureWorker(_ done: @escaping (Data?) -> Void) {
+        if let patchedWorker {
+            done(patchedWorker)
+            return
+        }
+        workerWaiters.append(done)
+        guard !workerLoading else { return }
+        workerLoading = true
+        guard let remote = URL(string: "https://js.player.cntv.cn/creator/live.worker.js") else {
+            finishWorker(nil)
+            return
+        }
+        fetch(remote, slug: currentSlug) { [weak self] data, _ in
+            self?.queue.async {
+                guard let self else { return }
+                guard let data, !data.isEmpty else {
+                    self.finishWorker(nil)
+                    return
+                }
+                let patched = Self.patchLiveWorker(data, hook: self.fetchHookScript())
+                self.patchedWorker = patched
+                self.finishWorker(patched)
+            }
+        }
+    }
+
+    private func finishWorker(_ data: Data?) {
+        workerLoading = false
+        let waiters = workerWaiters
+        workerWaiters.removeAll()
+        waiters.forEach { $0(data) }
+    }
+
+    private func serveWorker(_ connection: NWConnection) {
+        ensureWorker { [weak self] data in
+            guard let self else { return }
+            guard let data else {
+                self.respond(connection, status: 502, contentType: "text/plain", body: Data("worker\n".utf8))
+                return
+            }
+            self.respond(connection, status: 200, contentType: "text/javascript; charset=utf-8", body: data)
+        }
+    }
+
     private func serveH5eHTML(_ connection: NWConnection) {
         let boot = bootScript()
         let html = """
         <!DOCTYPE html><html><head><meta charset="utf-8">
         <script>\(boot)</script>
-        <script src="https://js.player.cntv.cn/creator/live.worker.js"></script>
+        <script src="/live.worker.js"></script>
         <script src="/h5e.js"></script>
         </head><body></body></html>
         """
