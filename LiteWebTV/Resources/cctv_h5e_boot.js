@@ -170,12 +170,4 @@
             return origStreaming(source, imports);
         };
     }
-    if (WebAssembly.Instance) {
-        var OrigInstance = WebAssembly.Instance;
-        WebAssembly.Instance = function (module, imports) {
-            if (imports && imports.env) wrapEnv(imports.env);
-            return new OrigInstance(module, imports);
-        };
-        WebAssembly.Instance.prototype = OrigInstance.prototype;
-    }
 })();
