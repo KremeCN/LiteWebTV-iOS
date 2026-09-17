@@ -22,12 +22,16 @@ assert.strictEqual(
     'https://js.player.cntv.cn/creator/live.worker.js'
 );
 
-function isLibraryPath(path) {
-    return path.toLowerCase().startsWith('/library/');
+function isConfigURL(url) {
+    const text = String(url || '').toLowerCase();
+    return text.includes('h5player') || text.includes('/library/');
 }
 
-assert.ok(isLibraryPath('/Library/H5player.json'));
-assert.ok(isLibraryPath('/library/ios.cdrm.sw.base.js'));
-assert.ok(!isLibraryPath('/h5e.js'));
+assert.ok(isConfigURL('/Library/H5player.json'));
+assert.ok(isConfigURL('https://tv.cctv.com/Library/H5player.json'));
+assert.ok(!isConfigURL('https://js.player.cntv.cn/creator/live.worker.js'));
+
+assert.ok(isConfigURL('/library/ios.cdrm.sw.base.js'));
+assert.ok(!isConfigURL('/h5e.js'));
 
 console.log('cctv_h5e_library_proxy tests passed');

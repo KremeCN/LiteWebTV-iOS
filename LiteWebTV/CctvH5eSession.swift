@@ -105,7 +105,8 @@ final class CctvH5eSession: NSObject, WKNavigationDelegate {
         config.limitsNavigationsToAppBoundDomains = false
         config.defaultWebpagePreferences.allowsContentJavaScript = true
         config.processPool = WKProcessPool()
-        config.websiteDataStore = .nonPersistent()
+        // InitPlayer 先走 emscripten IndexedDB，再 XHR。nonPersistent 上 IDB 打不开就会跳过密钥文件。
+        config.websiteDataStore = .default()
         let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 16, height: 16), configuration: config)
         webView.isOpaque = false
         webView.backgroundColor = .clear

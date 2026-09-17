@@ -263,9 +263,13 @@
                 var n = 0;
                 var timer = setInterval(function () {
                     n += 1;
-                    if (window.__lwtvH5eConfigLoaded || n >= 40) {
+                    if (window.__lwtvH5eConfigLoaded || n >= 80) {
                         clearInterval(timer);
-                        resolve(window.__lwtvH5eConfigLoaded ? 'ok' : 'ok-timeout');
+                        if (window.__lwtvH5eConfigLoaded) {
+                            resolve('ok');
+                            return;
+                        }
+                        resolve('ok-timeout last=' + (window.__lwtvH5eLastFetch || ''));
                     }
                 }, 50);
             });

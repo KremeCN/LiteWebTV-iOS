@@ -221,8 +221,9 @@ final class CctvHlsProxy {
             serveLibrary(path, connection: connection)
             return
         }
-        if path == "/h5e.js" {
-            if let url = Bundle.main.url(forResource: "cctv_h5e_host", withExtension: "js"),
+        if path == "/h5e.js" || path == "/h5e_boot.js" {
+            let resource = path == "/h5e_boot.js" ? "cctv_h5e_boot" : "cctv_h5e_host"
+            if let url = Bundle.main.url(forResource: resource, withExtension: "js"),
                let data = try? Data(contentsOf: url) {
                 respond(connection, status: 200, contentType: "text/javascript; charset=utf-8", body: data)
                 return
@@ -246,39 +247,7 @@ final class CctvHlsProxy {
 
     private static let h5eHTML = """
     <!DOCTYPE html><html><head><meta charset="utf-8">
-    <script>
-    (function () {
-      function rewrite(url) {
-        try {
-          var u = new URL(String(url), location.href);
-          var path = u.pathname;
-          if (path.indexOf('/Library/') === 0 || path.indexOf('/library/') === 0) {
-            return location.origin + path + u.search;
-          }
-        } catch (err) {}
-        return url;
-      }
-      window.__lwtvH5eConfigLoaded = false;
-      function markConfig() { window.__lwtvH5eConfigLoaded = true; }
-      var ofetch = window.fetch.bind(window);
-      window.fetch = function (input, init) {
-        var url = typeof input === 'string' ? rewrite(input) : (input && input.url ? rewrite(input.url) : input);
-        var req = (typeof input === 'string') ? url : (input && input.url ? new Request(url, input) : input);
-        var p = ofetch(req, init);
-        if (String(url).toLowerCase().indexOf('h5player.json') >= 0) p.then(markConfig, markConfig);
-        return p;
-      };
-      var open = XMLHttpRequest.prototype.open;
-      XMLHttpRequest.prototype.open = function (method, url) {
-        var next = typeof url === 'string' ? rewrite(url) : url;
-        arguments[1] = next;
-        if (String(next).toLowerCase().indexOf('h5player.json') >= 0) {
-          this.addEventListener('loadend', markConfig);
-        }
-        return open.apply(this, arguments);
-      };
-    })();
-    </script>
+    <script src="/h5e_boot.js"></script>
     <script src="https://js.player.cntv.cn/creator/live.worker.js"></script>
     <script src="/h5e.js"></script>
     </head><body></body></html>
