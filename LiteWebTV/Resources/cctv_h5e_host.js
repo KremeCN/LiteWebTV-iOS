@@ -23,13 +23,21 @@
             instance = instance();
         }
         moduleInstance = instance;
+        window.__lwtvH5eModule = instance;
         function markReady() {
             if (ready) return;
             ready = true;
+            window.__lwtvH5eModule = moduleInstance;
             done(null);
         }
         if (moduleInstance && typeof moduleInstance.then === 'function') {
-            moduleInstance.then(markReady);
+            moduleInstance.then(function (resolved) {
+                if (resolved) {
+                    moduleInstance = resolved;
+                    window.__lwtvH5eModule = resolved;
+                }
+                markReady();
+            });
             return;
         }
         if (moduleInstance && (moduleInstance._CNTV_InitPlayer || moduleInstance.calledRun)) {

@@ -1,130 +1,115 @@
 (function () {
     'use strict';
 
+    var H5PLAYER_JSON = '{"h5player":{"ver":20190904,"md5":"c7ed5a71dbe4dee1a2ba171f660ee98d","BTime":"2019-09-04-20:25:10"}}';
+
     window.__lwtvH5eConfigLoaded = false;
     window.__lwtvH5eLastFetch = '';
+    window.__lwtvH5eModule = null;
 
     function markConfig() {
         window.__lwtvH5eConfigLoaded = true;
     }
 
     function isConfigURL(url) {
-        var text = String(url || '').toLowerCase();
-        return text.indexOf('h5player') >= 0 || text.indexOf('/library/') >= 0;
+        return String(url || '').toLowerCase().indexOf('h5player') >= 0;
     }
 
-    function rewrite(url) {
+    var origEval = window.eval;
+    window.eval = function (code) {
+        if (code === 'self.location.host' || code === 'location.host') return 'tv.cctv.com';
+        if (code === 'self.location.protocol' || code === 'location.protocol') return 'https:';
+        if (code === 'self.location.href' || code === 'location.href') return 'https://tv.cctv.com/live/cctv1/';
+        return origEval(code);
+    };
+
+    function readCString(memory, ptr) {
+        if (!memory || !ptr) return '';
+        var bytes = new Uint8Array(memory.buffer);
+        var end = ptr;
+        while (end < bytes.length && bytes[end] !== 0) end++;
+        return new TextDecoder().decode(bytes.subarray(ptr, end));
+    }
+
+    function writeCString(heap, ptr, text, max) {
+        var i;
+        var n = Math.min(text.length, max - 1);
+        for (i = 0; i < n; i++) heap[ptr + i] = text.charCodeAt(i);
+        heap[ptr + n] = 0;
+    }
+
+    function invokeCallback(env, Module, index, ptr) {
+        if (!index) return;
         try {
-            var parsed = new URL(String(url), location.href);
-            var path = parsed.pathname;
-            if (path.indexOf('/Library/') === 0 || path.indexOf('/library/') === 0) {
-                return location.origin + path + parsed.search;
+            var fn = env.table && env.table.get(index);
+            if (typeof fn === 'function') {
+                fn(ptr);
+                return;
             }
         } catch (err) {}
-        return url;
-    }
-
-    function emptyFilesDB() {
-        function request(result) {
-            var req = { result: result, error: null, onsuccess: null, onerror: null };
-            setTimeout(function () {
-                if (typeof req.onsuccess === 'function') {
-                    req.onsuccess({ target: req });
-                }
-            }, 0);
-            return req;
+        if (typeof Module.dynCall_vi === 'function') {
+            try { Module.dynCall_vi(index, ptr); } catch (err) {}
         }
-        return {
-            objectStoreNames: { contains: function (name) { return name === 'FILES'; } },
-            createObjectStore: function () { return {}; },
-            deleteObjectStore: function () {},
-            transaction: function () {
-                return {
-                    objectStore: function () {
-                        return {
-                            get: function () { return request(undefined); },
-                            put: function () { return request(undefined); }
-                        };
-                    }
-                };
-            }
-        };
     }
 
-    if (window.indexedDB && indexedDB.open) {
-        var origOpen = indexedDB.open.bind(indexedDB);
-        indexedDB.open = function (name, version) {
-            var real;
+    function completeH5playerFetch(env, ptr) {
+        var Module = window.__lwtvH5eModule;
+        if (!Module || typeof Module._malloc !== 'function' || !Module.HEAPU8) {
+            window.__lwtvH5eLastFetch += '|no-module';
+            return false;
+        }
+        var payload = new TextEncoder().encode(H5PLAYER_JSON);
+        var dataPtr = Module._malloc(payload.length);
+        Module.HEAPU8.set(payload, dataPtr);
+        var heap32 = Module.HEAPU32;
+        var heap16 = Module.HEAPU16;
+        heap32[(ptr + 12) >> 2] = dataPtr;
+        heap32[(ptr + 16) >> 2] = payload.length;
+        heap32[(ptr + 20) >> 2] = 0;
+        heap32[(ptr + 24) >> 2] = 0;
+        heap32[(ptr + 28) >> 2] = 0;
+        heap32[(ptr + 32) >> 2] = payload.length;
+        heap32[(ptr + 36) >> 2] = 0;
+        heap16[(ptr + 40) >> 1] = 4;
+        heap16[(ptr + 42) >> 1] = 200;
+        writeCString(Module.HEAPU8, ptr + 44, 'OK', 64);
+        invokeCallback(env, Module, heap32[(ptr + 148) >> 2], ptr);
+        invokeCallback(env, Module, heap32[(ptr + 160) >> 2], ptr);
+        markConfig();
+        return true;
+    }
+
+    function wrapEnv(env) {
+        if (!env || env.__lwtvWrapped) return;
+        env.__lwtvWrapped = true;
+        var orig = env.q;
+        if (typeof orig !== 'function') return;
+        env.q = function (ptr) {
+            var url = '';
             try {
-                real = origOpen(name, version);
+                var heap32 = new Uint32Array(env.memory.buffer);
+                url = readCString(env.memory, heap32[(ptr + 8) >> 2]);
             } catch (err) {
-                real = null;
+                url = 'q-read-err';
             }
-            var wrapped = { onsuccess: null, onerror: null, onupgradeneeded: null };
-            if (!real) {
-                setTimeout(function () {
-                    wrapped.result = emptyFilesDB();
-                    if (typeof wrapped.onsuccess === 'function') {
-                        wrapped.onsuccess({ target: wrapped });
-                    }
-                }, 0);
-                return wrapped;
+            window.__lwtvH5eLastFetch = url || ('q:' + ptr);
+            if (isConfigURL(url) && completeH5playerFetch(env, ptr)) {
+                return ptr;
             }
-            real.addEventListener('success', function (event) {
-                wrapped.result = event.target.result;
-                if (typeof wrapped.onsuccess === 'function') {
-                    wrapped.onsuccess({ target: wrapped });
-                }
-            });
-            real.addEventListener('error', function () {
-                wrapped.result = emptyFilesDB();
-                if (typeof wrapped.onsuccess === 'function') {
-                    wrapped.onsuccess({ target: wrapped });
-                }
-            });
-            real.addEventListener('upgradeneeded', function (event) {
-                wrapped.result = event.target.result;
-                if (typeof wrapped.onupgradeneeded === 'function') {
-                    wrapped.onupgradeneeded({ target: wrapped });
-                }
-            });
-            return wrapped;
+            return orig.apply(this, arguments);
         };
     }
 
-    if (window.IDBObjectStore && IDBObjectStore.prototype.get) {
-        var origGet = IDBObjectStore.prototype.get;
-        IDBObjectStore.prototype.get = function (key) {
-            var req = origGet.call(this, key);
-            if (isConfigURL(key)) {
-                req.addEventListener('success', function () {
-                    if (req.result) markConfig();
-                });
-            }
-            return req;
+    var origInstantiate = WebAssembly.instantiate.bind(WebAssembly);
+    WebAssembly.instantiate = function (buffer, imports) {
+        if (imports && imports.env) wrapEnv(imports.env);
+        return origInstantiate(buffer, imports);
+    };
+    if (WebAssembly.instantiateStreaming) {
+        var origStreaming = WebAssembly.instantiateStreaming.bind(WebAssembly);
+        WebAssembly.instantiateStreaming = function (source, imports) {
+            if (imports && imports.env) wrapEnv(imports.env);
+            return origStreaming(source, imports);
         };
     }
-
-    var origFetch = window.fetch.bind(window);
-    window.fetch = function (input, init) {
-        var url = typeof input === 'string' ? rewrite(input) : (input && input.url ? rewrite(input.url) : input);
-        var req = (typeof input === 'string') ? url : (input && input.url ? new Request(url, input) : input);
-        if (isConfigURL(url)) window.__lwtvH5eLastFetch = String(url);
-        var pending = origFetch(req, init);
-        if (isConfigURL(url)) pending.then(markConfig, markConfig);
-        return pending;
-    };
-
-    var origOpen = XMLHttpRequest.prototype.open;
-    XMLHttpRequest.prototype.open = function (method, url) {
-        var next = typeof url === 'string' ? rewrite(url) : url;
-        arguments[1] = next;
-        window.__lwtvH5eLastFetch = String(next);
-        if (isConfigURL(next)) {
-            this.addEventListener('loadend', function () {
-                if (this.status === 0 || (this.status >= 200 && this.status < 300)) markConfig();
-            });
-        }
-        return origOpen.apply(this, arguments);
-    };
 })();
