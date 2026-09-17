@@ -68,19 +68,40 @@
         if (!video.hasAttribute('webkit-playsinline')) video.setAttribute('webkit-playsinline', '');
     }
 
+    var playInFlight = false;
+    var lastPlayAt = 0;
+
     function tryPlayVideo() {
-        var video = document.querySelector('video');
+        var video = document.querySelector('video[id^="h5player_"]') || document.querySelector('video');
         if (!video) return false;
-        if (!video.paused) return true;
-        var src = video.getAttribute('src') || '';
+        if (!video.paused && video.readyState >= 2) return true;
+        var src = video.currentSrc || video.src || video.getAttribute('src') || '';
         if (src.length < 8) return false;
+        var now = Date.now();
+        if (playInFlight || now - lastPlayAt < 500) return false;
+        lastPlayAt = now;
+        playInFlight = true;
+        try {
+            if (!video.hasAttribute('playsinline')) video.setAttribute('playsinline', '');
+            if (!video.hasAttribute('webkit-playsinline')) video.setAttribute('webkit-playsinline', '');
+        } catch (e) { }
+        var wantSound = !video.muted;
+        video.muted = true;
         var playPromise = video.play();
-        if (playPromise && typeof playPromise.then === 'function') {
-            playPromise.catch(function (err) {
+        function finish(ok, err) {
+            playInFlight = false;
+            if (ok && wantSound) {
+                try { video.muted = false; } catch (e2) { }
+            }
+            if (!ok) {
                 postConsole('warn', '[CCTV] play rejected ' + (err && err.name) + ' ' + (err && err.message));
-            });
+            }
+        }
+        if (playPromise && typeof playPromise.then === 'function') {
+            playPromise.then(function () { finish(true); }).catch(function (err) { finish(false, err); });
             return false;
         }
+        finish(!video.paused);
         return !video.paused;
     }
 
@@ -134,9 +155,8 @@
 
     addTask('autoPlay', function () {
         if (tryPlayVideo()) return true;
-        if (clickPlayButton()) return true;
-        // 视频可能还没拿到 src（src.length<8 时 tryPlayVideo 返回 false）。
-        // 保留任务等 MutationObserver 的下一帧重试，不要一次失败就永久放弃。
+        // 点播放按钮也不算用户手势；不要当成成功，DOM 静下来之后还要靠定时器重试。
+        clickPlayButton();
         return false;
     });
 
@@ -166,6 +186,9 @@
     });
     window.addEventListener('resize', _scheduleRun);
     window.addEventListener('orientationchange', _scheduleRun);
+    setInterval(function () {
+        if (_tasks.has('autoPlay')) _scheduleRun();
+    }, 500);
 
     window.extractData = function () { };
 })();

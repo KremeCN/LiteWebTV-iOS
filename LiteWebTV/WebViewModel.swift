@@ -78,6 +78,7 @@ final class WebViewModel: NSObject, ObservableObject {
     private var nativeAttempt = 0
     private var nativeReadyTimeout: DispatchWorkItem?
     private let nativeReadyTimeoutInterval: TimeInterval = 5
+    private var cctvPlayKickGeneration = 0
 
     var visibleSurface: VisibleWebSurface {
         if isCompareMode { return .probe }
@@ -103,6 +104,9 @@ final class WebViewModel: NSObject, ObservableObject {
         }
         CctvH5eSession.shared.onLog = { [weak self] line in
             self?.diagnostics.log("h5e", line)
+        }
+        CctvHlsProxy.shared.onLog = { [weak self] line in
+            self?.diagnostics.log("hls", line)
         }
         nativePlayer.onVideoSize = { [weak self] size in
             self?.diagnostics.log("h5e", "video size \(Int(size.width))x\(Int(size.height))")
@@ -576,7 +580,11 @@ final class WebViewModel: NSObject, ObservableObject {
         }
     }
 
-    private func activate(_ webView: WKWebView, completion: @escaping () -> Void = {}) {
+    private func activate(
+        _ webView: WKWebView,
+        kickPlayback: Bool = true,
+        completion: @escaping () -> Void = {}
+    ) {
         mediaGeneration += 1
         let generation = mediaGeneration
         let label = describe(webView)
@@ -587,8 +595,8 @@ final class WebViewModel: NSObject, ObservableObject {
                 self.diagnostics.log("media", "activate aborted stale gen=\(generation)")
                 return
             }
-            // 被挂起过的页面：setAllMediaPlaybackSuspended(false) 不会重新 load 已有的 src，
-            // <video> 会停在 metadata 阶段。先显式解除挂起，再补一次 load+play。
+            // 被挂起过的页面：必须等 setAllMediaPlaybackSuspended(false) 完成后再 load/play。
+            // 在挂起态里创建的 <video> 会一直 NotAllowedError。
             webView.setAllMediaPlaybackSuspended(false) { [weak self] in
                 guard let self else { return }
                 guard generation == self.mediaGeneration else { return }
@@ -602,7 +610,9 @@ final class WebViewModel: NSObject, ObservableObject {
                     } else {
                         self.setYangshipinArmed(false)
                         self.yangshipinReadyToClick = false
-                        self.reviveSuspendedVideo(in: webView)
+                        if kickPlayback, webView === self.cctvWebView {
+                            self.scheduleCctvPlayKick(reason: "activate")
+                        }
                     }
                     completion()
                 }
@@ -610,35 +620,53 @@ final class WebViewModel: NSObject, ObservableObject {
         }
     }
 
-    /// 唤醒被挂起过的央视网页 <video>：reload src 并 play，绕开 WK 的 metadata 卡死。
-    private func reviveSuspendedVideo(in webView: WKWebView) {
-        guard playbackMode == .cctv, !nativePlaybackActive else { return }
-        let js = """
-        (function(){
-            var v = document.querySelector('video');
-            if (!v) return 'no-video';
-            if (!v.paused && v.readyState >= 3 && v.currentTime > 0.1) return 'already-playing';
-            var src = v.currentSrc || v.src || '';
-            if (src.length < 8) return 'no-src';
-            try { v.load(); } catch (e) {}
-            var p = v.play();
-            if (p && typeof p.then === 'function') {
-                p.then(function(){ return 'played'; })
-                 .catch(function(e){ return 'rejected:' + (e && e.name); });
-            } else {
-                return 'play-sync';
+    /// 网页 <video> 可能晚于 didFinish 才出现；异步 play() 也必须 await 才能记到日志。
+    private func scheduleCctvPlayKick(reason: String) {
+        guard playbackMode == .cctv, !nativePlaybackActive, !isCompareMode else { return }
+        cctvPlayKickGeneration += 1
+        let generation = cctvPlayKickGeneration
+        diagnostics.log("media", "play-kick start reason=\(reason) gen=\(generation)")
+        for delay in [0.25, 0.8, 1.6, 3.0, 5.0] as [TimeInterval] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self,
+                      generation == self.cctvPlayKickGeneration,
+                      self.playbackMode == .cctv,
+                      !self.nativePlaybackActive else { return }
+                self.kickCctvVideo(at: delay)
             }
-        })();
+        }
+    }
+
+    private func kickCctvVideo(at delay: TimeInterval) {
+        let js = """
+        var v = document.querySelector('video[id^="h5player_"]') || document.querySelector('video');
+        if (!v) return 'no-video';
+        if (!v.paused && v.readyState >= 3 && v.currentTime > 0.1) return 'already-playing';
+        var src = v.currentSrc || v.src || v.getAttribute('src') || '';
+        if (src.length < 8) return 'no-src ready=' + v.readyState;
+        try {
+            v.setAttribute('playsinline', '');
+            v.setAttribute('webkit-playsinline', '');
+        } catch (e) {}
+        var wantSound = !v.muted;
+        v.muted = true;
+        try {
+            await v.play();
+            if (wantSound) {
+                try { v.muted = false; } catch (e2) {}
+            }
+            return 'played ready=' + v.readyState + ' t=' + Math.floor(v.currentTime);
+        } catch (err) {
+            return 'rejected:' + (err && err.name) + ' ' + String((err && err.message) || '');
+        }
         """
-        webView.evaluateJavaScript(js) { [weak self] result, error in
+        cctvWebView.callAsyncJavaScript(js, arguments: [:], in: nil, in: .page) { [weak self] value, error in
             guard let self else { return }
             if let error {
-                self.diagnostics.log("media", "revive video failed \(String(describing: error.localizedDescription))")
+                self.diagnostics.log("media", "play-kick t+\(delay) failed \(error.localizedDescription)")
                 return
             }
-            if let text = result as? String {
-                self.diagnostics.log("media", "revive video \(text)")
-            }
+            self.diagnostics.log("media", "play-kick t+\(delay) \(String(describing: value))")
         }
     }
 
@@ -754,6 +782,7 @@ final class WebViewModel: NSObject, ObservableObject {
 
     private func loadCctvPage(for slug: String) {
         activeCctvSlug = slug
+        cctvPlayKickGeneration += 1
         guard let url = CCTVCatalog.pageURLs(for: slug).first else { return }
         diagnostics.log("nav", "cctv load \(diagnostics.redactURLString(url.absoluteString))")
         cctvWebView.load(URLRequest(url: url))
@@ -769,6 +798,7 @@ final class WebViewModel: NSObject, ObservableObject {
         nativeAttempt += 1
         let attempt = nativeAttempt
         cancelNativeReadyTimeout()
+        cctvPlayKickGeneration += 1
         mediaGeneration += 1
         nativePlaybackActive = true
         activeCctvSlug = slug
@@ -829,9 +859,14 @@ final class WebViewModel: NSObject, ObservableObject {
         abandonNativeKeepingSession()
         if CctvNativeCatalog.allowsWebpageFallback(slug), playbackMode == .cctv {
             splashDeadlineExtend += 1
-            // 先激活（解除挂起），再加载：didCommit 注入的 automation 才会跑在已唤醒的页面上。
-            activate(cctvWebView)
-            loadCctvPage(for: slug)
+            // 必须等解除挂起完成后再 load。挂起态里起的文档，后面 play() 会一直 NotAllowedError。
+            activate(cctvWebView, kickPlayback: false) { [weak self] in
+                guard let self,
+                      self.playbackMode == .cctv,
+                      !self.nativePlaybackActive,
+                      self.activeCctvSlug == slug else { return }
+                self.loadCctvPage(for: slug)
+            }
             return
         }
         playbackError = "该频道暂无法播放"
@@ -1239,6 +1274,12 @@ extension WebViewModel: WKNavigationDelegate {
         }
         if webView === cctvWebView {
             injectScripts(for: .cctv, into: webView)
+            if !nativePlaybackActive {
+                // 原生路径里发出的 suspend 可能晚到，这里再解挂一次再 kick play。
+                webView.setAllMediaPlaybackSuspended(false) { [weak self] in
+                    self?.scheduleCctvPlayKick(reason: "didFinish")
+                }
+            }
             if let slug = activeCctvSlug { fetchEpg(for: slug) }
             return
         }
