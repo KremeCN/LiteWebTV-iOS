@@ -29,12 +29,23 @@
         return url;
     }
 
+    var LOCATION_HREF = 'blob:https://tv.cctv.com/5bca710b-9f02-41f0-a9f1-102bbc65192a';
     var origEval = window.eval;
     window.eval = function (code) {
-        // 只记日志，不改返回值。隐藏页就在 127.0.0.1，InitPlayer 会拼
-        // http://127.0.0.1:<port>/Library/H5player.json，本地代理本来就在提供这份 JSON。
-        // 空 host / blob: 会让 wasm 在 eval protocol 之前短路，表现为 ep 缺失、pending=0。
+        // worker 的 _emscripten_asm_const_ii 会走 eval(name)。这里与 NativeWasmTv env.y 对齐。
         var text = String(code || '');
+        if (text === 'self.location.host' || text === 'location.host') {
+            window.__lwtvH5eLastFetch = (window.__lwtvH5eLastFetch || '') + '|eh';
+            return '';
+        }
+        if (text === 'self.location.protocol' || text === 'location.protocol') {
+            window.__lwtvH5eLastFetch = (window.__lwtvH5eLastFetch || '') + '|ep';
+            return 'blob:';
+        }
+        if (text === 'self.location.href' || text === 'location.href') {
+            window.__lwtvH5eLastFetch = (window.__lwtvH5eLastFetch || '') + '|er';
+            return LOCATION_HREF;
+        }
         if (text.indexOf('location') >= 0) {
             window.__lwtvH5eLastFetch = (window.__lwtvH5eLastFetch || '') + '|ev:' + text.replace(/\s+/g, '');
         }
@@ -60,7 +71,9 @@
                     'http://tv.cctv.com/Library/H5player.json',
                     location.origin + '/Library/H5player.json',
                     '/Library/H5player.json',
-                    'H5player.json'
+                    'H5player.json',
+                    'blob:///Library/H5player.json',
+                    'blob://Library/H5player.json'
                 ].forEach(function (key) {
                     try { store.put(payload, key); } catch (err) {}
                 });
@@ -155,13 +168,9 @@
             } catch (err) {
                 url = 'q-read-err';
             }
-            window.__lwtvH5eLastFetch = url || ('q:' + ptr);
-            if (isConfigURL(url)) {
-                /* 与 worker hook 一致：只挂起，host 在 InitPlayer 返回后补。 */
-                window.__lwtvH5ePendingFetch = ptr;
-                return ptr;
-            }
-            return orig.apply(this, arguments);
+            window.__lwtvH5eLastFetch = (url || ('q:' + ptr)) + '|q';
+            window.__lwtvH5ePendingFetch = ptr;
+            return ptr;
         };
     }
 
