@@ -151,7 +151,9 @@
                 url = 'q-read-err';
             }
             window.__lwtvH5eLastFetch = url || ('q:' + ptr);
-            if (isConfigURL(url) && completeH5playerFetch(env, ptr)) {
+            if (isConfigURL(url)) {
+                /* 与 worker hook 一致：只挂起，host 在 InitPlayer 返回后补。 */
+                window.__lwtvH5ePendingFetch = ptr;
                 return ptr;
             }
             return orig.apply(this, arguments);

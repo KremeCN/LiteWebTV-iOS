@@ -342,7 +342,7 @@ final class CctvHlsProxy {
         let html = """
         <!DOCTYPE html><html><head><meta charset="utf-8">
         <script>\(boot)</script>
-        <script src="/live.worker.js" onerror="this.onerror=null;this.src='https://js.player.cntv.cn/creator/live.worker.js'"></script>
+        <script src="/live.worker.js"></script>
         <script src="/h5e.js"></script>
         </head><body></body></html>
         """
