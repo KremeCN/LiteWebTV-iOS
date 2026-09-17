@@ -106,8 +106,10 @@ final class CctvH5eSession: NSObject, WKNavigationDelegate {
         config.defaultWebpagePreferences.allowsContentJavaScript = true
         config.processPool = WKProcessPool()
         config.websiteDataStore = .nonPersistent()
-        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 4, height: 4), configuration: config)
-        webView.isHidden = true
+        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 16, height: 16), configuration: config)
+        webView.isOpaque = false
+        webView.backgroundColor = .clear
+        webView.alpha = 0.01
         webView.navigationDelegate = self
         self.webView = webView
         attachIfNeeded()
@@ -125,7 +127,8 @@ final class CctvH5eSession: NSObject, WKNavigationDelegate {
             .compactMap({ $0 as? UIWindowScene })
             .flatMap(\.windows)
             .first(where: \.isKeyWindow) ?? UIApplication.shared.windows.first {
-            webView.frame = CGRect(x: -16, y: -16, width: 8, height: 8)
+            webView.frame = CGRect(x: 0, y: 0, width: 16, height: 16)
+            webView.alpha = 0.01
             window.addSubview(webView)
         }
     }

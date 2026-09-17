@@ -96,15 +96,13 @@
     }
 
     function decryptNAL(nal) {
-        var header = nal[0];
-        var type = header & 0x1f;
+        if (!nal || !nal.length) return null;
+        var type = nal[0] & 0x1f;
         if (type === 25) {
             shouldDecrypt = nal.length > 1 && nal[1] === 1;
-        } else if (type === 1 || type === 5) {
-            if (!shouldDecrypt) return null;
-        } else {
-            return null;
         }
+        // cdrmld 把 SPS/PPS 一并加密；只解 1/5 会留下 1280x176 这种假尺寸，VideoToolbox 纯黑。
+        if (!shouldDecrypt) return null;
 
         updatePlayer();
         var addr = moduleInstance._jsmalloc(nal.byteLength + PAGE_HOST.length + MEMORY_EXTEND);

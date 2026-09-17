@@ -104,6 +104,9 @@ final class WebViewModel: NSObject, ObservableObject {
         CctvH5eSession.shared.onLog = { [weak self] line in
             self?.diagnostics.log("h5e", line)
         }
+        nativePlayer.onVideoSize = { [weak self] size in
+            self?.diagnostics.log("h5e", "video size \(Int(size.width))x\(Int(size.height))")
+        }
         diagnostics.beginSession("app launch build=\(PlaybackDiagnostics.buildID)")
         diagnostics.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
