@@ -441,7 +441,7 @@
         isReady: function () { return ready && typeof CNTVModule === 'function'; },
         start: function () {
             try {
-                startSession();
+                startSession(true);
             } catch (err) {
                 return Promise.resolve('start-err ' + String(err) + ' last=' + (window.__lwtvH5eLastFetch || ''));
             }
@@ -489,9 +489,8 @@
                 return res.arrayBuffer();
             }).then(function (buf) {
                 try {
-                    // 密钥还没装上时不要每个分片 Uninit：InitPlayer 不会重发 fetch，只会刷 |np。
-                    // 有配置之后再按 NativeWasmTv 每个 TS 重置。
-                    startSession(!!window.__lwtvH5eConfigLoaded);
+                    // UpdatePlayer 连续跑几个分片后 VMP 会错；NativeWasmTv 每个 TS 都 Uninit+Init。
+                    startSession(true);
                 } catch (err) {
                     return put(buf, 'ok nals=0 changed=0 skipped=0 tag=reset-err last=' +
                         (window.__lwtvH5eLastFetch || ''));
