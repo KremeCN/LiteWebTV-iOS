@@ -8,10 +8,11 @@ const hook = fs.readFileSync(hookPath, 'utf8');
 
 assert.ok(!hook.includes('</script>'), 'fetch hook must be inline-safe');
 assert.ok(hook.includes('_emscripten_start_fetch'), 'hook wraps start_fetch');
-assert.ok(hook.includes('h5player'), 'hook recognizes H5player.json');
+assert.ok(hook.includes('__lwtvH5ePendingFetch'), 'hook queues emscripten fetch');
 assert.ok(hook.includes('__lwtvH5eWorkerPatched'), 'hook marks patched state');
 
 assert.ok(hook.includes('_emscripten_asm_const_ii'), 'hook wraps asm_const location eval');
+assert.ok(hook.includes('blob:'), 'hook spoofs blob location for InitPlayer');
 
 function patchLiveWorker(source, hookText) {
     const needle = 'var asmGlobalArg={}';
