@@ -28,6 +28,7 @@ targets:
     dependencies:
       - sdk: MediaPlayer.framework
       - sdk: AVFoundation.framework
+      - sdk: Network.framework
       - sdk: WebKit.framework
     settings:
       base:

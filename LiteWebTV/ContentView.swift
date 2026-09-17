@@ -150,6 +150,12 @@ struct ContentView: View {
                     probeRevision: viewModel.probeRevision
                 )
 
+                if viewModel.nativePlaybackActive && !viewModel.isCompareMode {
+                    NativePlayerView(player: viewModel.nativePlayer.player)
+                        .ignoresSafeArea()
+                        .allowsHitTesting(false)
+                }
+
                 if !viewModel.isCompareMode {
                     gestureLayer(in: geo)
                 }
@@ -273,18 +279,12 @@ struct ContentView: View {
                 animateCurtainRise()
             }
         }
+        .onReceive(viewModel.$splashDeadlineExtend) { token in
+            guard token > 0, showSplash else { return }
+            scheduleSplashFallback()
+        }
         .onAppear {
-            // 10 秒兜底：如果 JS 信号未到达，强制升起幕布
-            splashFallbackTask = Task {
-                try? await Task.sleep(nanoseconds: 10_000_000_000)
-                if !Task.isCancelled {
-                    await MainActor.run {
-                        if showSplash {
-                            animateCurtainRise()
-                        }
-                    }
-                }
-            }
+            scheduleSplashFallback()
         }
         .onReceive(viewModel.$playbackMode) { mode in
             if showSplash && splashStatusText.isEmpty
@@ -589,17 +589,31 @@ struct ContentView: View {
         splashStatusText = statusText
         splashOffset = 0
         showSplash = true
+        scheduleSplashFallback()
+    }
 
-        // 10 秒兜底
+    private func scheduleSplashFallback() {
         splashFallbackTask?.cancel()
+        let started = Date()
         splashFallbackTask = Task {
-            try? await Task.sleep(nanoseconds: 10_000_000_000)
-            if !Task.isCancelled {
-                await MainActor.run {
-                    if showSplash {
-                        animateCurtainRise()
-                    }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                let shouldRise = await MainActor.run { () -> Bool in
+                    guard showSplash else { return false }
+                    let elapsed = Date().timeIntervalSince(started)
+                    let limit: TimeInterval = viewModel.nativePlaybackActive ? 36 : 10
+                    return elapsed >= limit
                 }
+                if shouldRise {
+                    await MainActor.run {
+                        if showSplash {
+                            animateCurtainRise()
+                        }
+                    }
+                    return
+                }
+                let finished = await MainActor.run { !showSplash }
+                if finished { return }
             }
         }
     }

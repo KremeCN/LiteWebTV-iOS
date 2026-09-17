@@ -71,6 +71,13 @@ final class WebViewModel: NSObject, ObservableObject {
     private(set) var yangshipinWebView: WKWebView!
     private(set) var cctvWebView: WKWebView!
     private(set) var probeWebView: WKWebView!
+    let nativePlayer = CctvNativePlayer()
+    @Published private(set) var nativePlaybackActive = false
+    /// 原生 CDN 失败改走网页时，让幕布重新计时，避免 10 秒兜底提前掀开。
+    @Published private(set) var splashDeadlineExtend = 0
+    private var nativeAttempt = 0
+    private var nativeReadyTimeout: DispatchWorkItem?
+    private let nativeReadyTimeoutInterval: TimeInterval = 5
 
     var visibleSurface: VisibleWebSurface {
         if isCompareMode { return .probe }
@@ -88,9 +95,20 @@ final class WebViewModel: NSObject, ObservableObject {
         super.init()
         loadScripts()
         configureWebViews()
+        nativePlayer.onReady = { [weak self] in
+            self?.handleNativeReady()
+        }
+        nativePlayer.onFailed = { [weak self] _ in
+            self?.failNativeCctv(reason: "player")
+        }
         diagnostics.beginSession("app launch build=\(PlaybackDiagnostics.buildID)")
         diagnostics.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in
+                self?.resumeCctvIfPausedAfterVolume()
+            }
             .store(in: &cancellables)
         startPlaybackRouting()
         startScheduleTicker()
@@ -137,6 +155,7 @@ final class WebViewModel: NSObject, ObservableObject {
         rebuildProbeWebView(operation: operation) { [weak self] webView in
             guard let self, operation == self.probeOperationGeneration else { return }
             self.isCompareMode = true
+            self.nativePlayer.pause()
             self.diagnostics.log(
                 "nav",
                 "probe prepared \(self.diagnostics.redactURLString(url.absoluteString)) session=\(session)"
@@ -156,6 +175,10 @@ final class WebViewModel: NSObject, ObservableObject {
         diagnostics.log("session", "exit official compare")
         isCompareMode = false
         probeWebView.stopLoading()
+        if nativePlaybackActive {
+            nativePlayer.resumeIfPaused()
+            return
+        }
         activateCurrentNormalWebView()
     }
 
@@ -388,7 +411,7 @@ final class WebViewModel: NSObject, ObservableObject {
             playbackMode = .cctv
             if let slug = launchCctvSlug() {
                 diagnostics.log("session", "launch restore CCTV \(slug)")
-                loadCctvPage(for: slug)
+                startNativeCctv(slug: slug)
             }
         } else {
             playbackMode = .yangshipin
@@ -398,6 +421,9 @@ final class WebViewModel: NSObject, ObservableObject {
         loadYangshipinHome()
         if playbackMode == .yangshipin {
             activate(yangshipinWebView)
+        } else if nativePlaybackActive {
+            suspend(cctvWebView)
+            suspend(yangshipinWebView)
         } else {
             activate(cctvWebView)
         }
@@ -495,8 +521,10 @@ final class WebViewModel: NSObject, ObservableObject {
         closePresentations: Bool = false,
         completion: @escaping () -> Void
     ) {
+        let generation = mediaGeneration
         webView.requestMediaPlaybackState { [weak self] state in
-            self?.diagnostics.log("media", "state before suspend \(label) raw=\(state.rawValue)")
+            guard let self, generation == self.mediaGeneration else { return }
+            self.diagnostics.log("media", "state before suspend \(label) raw=\(state.rawValue)")
         }
         // 央视频的取流签名会在 `setAllMediaPlaybackSuspended(true)` 期间失效，后台只暂停 DOM 媒体。
         if webView === yangshipinWebView {
@@ -506,13 +534,15 @@ final class WebViewModel: NSObject, ObservableObject {
             return
         }
         webView.setAllMediaPlaybackSuspended(true) { [weak self] in
+            guard let self, generation == self.mediaGeneration else { return }
             if closePresentations {
                 webView.closeAllMediaPresentations {
-                    self?.diagnostics.log("media", "suspended \(label) closePresentations=true")
+                    guard generation == self.mediaGeneration else { return }
+                    self.diagnostics.log("media", "suspended \(label) closePresentations=true")
                     completion()
                 }
             } else {
-                self?.diagnostics.log("media", "suspended \(label) closePresentations=false")
+                self.diagnostics.log("media", "suspended \(label) closePresentations=false")
                 completion()
             }
         }
@@ -572,6 +602,7 @@ final class WebViewModel: NSObject, ObservableObject {
     }
 
     private func activateCurrentNormalWebView() {
+        if nativePlaybackActive { return }
         if playbackMode == .cctv {
             activate(cctvWebView)
         } else {
@@ -608,11 +639,11 @@ final class WebViewModel: NSObject, ObservableObject {
             playbackMode = .cctv
             pendingYangshipinDomIndex = nil
             setYangshipinArmed(false)
-            diagnostics.log("session", "switch CCTV \(slug)")
-            loadCctvPage(for: slug)
-            activate(cctvWebView)
+            diagnostics.log("session", "switch CCTV native \(slug)")
+            startNativeCctv(slug: slug)
         case .yangshipin:
             guard let domIndex = channel.yangshipinDomIndex else { return }
+            stopNativeCctv()
             playbackMode = .yangshipin
             activeCctvSlug = nil
             programs = []
@@ -662,6 +693,99 @@ final class WebViewModel: NSObject, ObservableObject {
         diagnostics.log("nav", "cctv load \(diagnostics.redactURLString(url.absoluteString))")
         cctvWebView.load(URLRequest(url: url))
         fetchEpg(for: slug)
+    }
+
+    private func startNativeCctv(slug: String) {
+        if nativePlaybackActive, activeCctvSlug == slug, nativePlayer.player.currentItem != nil {
+            fetchEpg(for: slug)
+            nativePlayer.resumeIfPaused()
+            return
+        }
+        nativeAttempt += 1
+        let attempt = nativeAttempt
+        cancelNativeReadyTimeout()
+        mediaGeneration += 1
+        nativePlaybackActive = true
+        activeCctvSlug = slug
+        pendingYangshipinDomIndex = nil
+        setYangshipinArmed(false)
+        cctvWebView.stopLoading()
+        suspend(cctvWebView)
+        suspend(yangshipinWebView)
+        fetchEpg(for: slug)
+        do {
+            try CctvHlsProxy.shared.start(decryptor: CctvH5eSession.shared)
+        } catch {
+            failNativeCctv(reason: "proxy", attempt: attempt)
+            return
+        }
+        CctvH5eSession.shared.prepare { [weak self] ok in
+            guard let self, self.nativeAttempt == attempt, self.activeCctvSlug == slug else { return }
+            guard ok, let url = CctvHlsProxy.shared.playURL(for: slug) else {
+                CctvH5eSession.shared.teardown()
+                self.diagnostics.log("session", "native wasm host failed slug=\(slug); wasm2c fallback not in this build")
+                self.failNativeCctv(reason: "wasm", attempt: attempt)
+                return
+            }
+            CctvH5eSession.shared.resetChannel { [weak self] in
+                guard let self, self.nativeAttempt == attempt, self.activeCctvSlug == slug, self.nativePlaybackActive else { return }
+                self.diagnostics.log("session", "native play \(slug) \(url.port ?? 0)")
+                self.nativePlayer.play(url: url)
+                self.scheduleNativeReadyTimeout(attempt: attempt)
+            }
+        }
+    }
+
+    private func scheduleNativeReadyTimeout(attempt: Int) {
+        cancelNativeReadyTimeout()
+        let work = DispatchWorkItem { [weak self] in
+            self?.failNativeCctv(reason: "timeout", attempt: attempt)
+        }
+        nativeReadyTimeout = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + nativeReadyTimeoutInterval, execute: work)
+    }
+
+    private func cancelNativeReadyTimeout() {
+        nativeReadyTimeout?.cancel()
+        nativeReadyTimeout = nil
+    }
+
+    private func handleNativeReady() {
+        guard nativePlaybackActive else { return }
+        cancelNativeReadyTimeout()
+        shouldDismissSplash = true
+    }
+
+    private func failNativeCctv(reason: String, attempt: Int? = nil) {
+        if let attempt, attempt != nativeAttempt { return }
+        guard nativePlaybackActive, let slug = activeCctvSlug else { return }
+        cancelNativeReadyTimeout()
+        diagnostics.log("session", "native fail \(slug) reason=\(reason)")
+        abandonNativeKeepingSession()
+        if CctvNativeCatalog.allowsWebpageFallback(slug), playbackMode == .cctv {
+            splashDeadlineExtend += 1
+            loadCctvPage(for: slug)
+            activate(cctvWebView)
+            return
+        }
+        playbackError = "该频道暂无法播放"
+        shouldDismissSplash = true
+    }
+
+    /// 停画面但留下代理和 WASM，方便下一台再走 CDN。
+    private func abandonNativeKeepingSession() {
+        nativePlaybackActive = false
+        nativePlayer.stop()
+    }
+
+    private func stopNativeCctv() {
+        cancelNativeReadyTimeout()
+        nativeAttempt += 1
+        guard nativePlaybackActive || nativePlayer.player.currentItem != nil || CctvHlsProxy.shared.port != 0 else { return }
+        nativePlaybackActive = false
+        nativePlayer.stop()
+        CctvH5eSession.shared.teardown()
+        CctvHlsProxy.shared.stop()
     }
 
     private func updateActiveChannelHighlight() {
@@ -884,6 +1008,10 @@ final class WebViewModel: NSObject, ObservableObject {
 
     /// 手势调系统音量可能打断 WKWebView 原生 HLS；若央视网视频因此暂停则恢复。
     func resumeCctvIfPausedAfterVolume() {
+        if nativePlaybackActive {
+            nativePlayer.resumeIfPaused()
+            return
+        }
         guard playbackMode == .cctv, !isCompareMode else { return }
         let js = """
         (function(){
@@ -899,6 +1027,10 @@ final class WebViewModel: NSObject, ObservableObject {
     }
 
     func togglePlayPause() {
+        if nativePlaybackActive {
+            nativePlayer.togglePause()
+            return
+        }
         let target: WKWebView = isCompareMode ? probeWebView : (playbackMode == .cctv ? cctvWebView : yangshipinWebView)
         let operationID = UUID().uuidString
         let targetID = ObjectIdentifier(target)
@@ -1138,6 +1270,7 @@ extension WebViewModel: WKScriptMessageHandler {
 
             case "dismissSplash":
                 if self.isCompareMode { return }
+                if self.nativePlaybackActive { return }
                 if fromYangshipin && self.playbackMode != .yangshipin { return }
                 self.onDismissSplash()
 
