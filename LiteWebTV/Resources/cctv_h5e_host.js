@@ -357,7 +357,10 @@
                         clearInterval(timer);
                         var diag = ' last=' + (window.__lwtvH5eLastFetch || '') +
                             ' boot=' + (window.__lwtvH5eBoot ? '1' : '0') +
-                            ' wrap=' + (window.__lwtvH5eWrap ? '1' : '0');
+                            ' wrap=' + (window.__lwtvH5eWrap ? '1' : '0') +
+                            ' patched=' + (window.__lwtvH5eWorkerPatched ? '1' : '0') +
+                            (window.__lwtvH5eWorkerPatchErr ? ' patcherr=' + window.__lwtvH5eWorkerPatchErr : '') +
+                            ' pending=' + (window.__lwtvH5ePendingFetch || 0);
                         resolve((window.__lwtvH5eConfigLoaded ? 'ok' : 'ok-timeout') + diag);
                     }
                 }, 50);

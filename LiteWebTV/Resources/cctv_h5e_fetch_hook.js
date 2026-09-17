@@ -1,6 +1,9 @@
 ;(function () {
     try {
         var orig = _emscripten_start_fetch;
+        if (typeof window !== 'undefined') {
+            window.__lwtvH5eWorkerPatched = 1;
+        }
         _emscripten_start_fetch = function (fetchPtr, ok, err, prog, ready) {
             var url = '';
             try {
@@ -21,5 +24,9 @@
             }
             return orig.apply(this, arguments);
         };
-    } catch (err) {}
+    } catch (err) {
+        if (typeof window !== 'undefined') {
+            window.__lwtvH5eWorkerPatchErr = String(err);
+        }
+    }
 })();
