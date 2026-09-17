@@ -13,7 +13,7 @@
             if (typeof window !== 'undefined') {
                 window.__lwtvH5eLastFetch = url || ('fetch:' + fetchPtr);
             }
-            if (url && url.toLowerCase().indexOf('h5player') >= 0) {
+            if (url && /h5player|^blob:/i.test(url)) {
                 /* 挂起所有 H5player 配置请求（XHR 与 IDB 缓存路径都拦在前面）：
                  * wasm 官方语义是异步回调，InitPlayer 还在栈上时同步触发会重入 wasm。
                  * host JS 在 InitPlayer 返回后调用 completePendingFetch 补响应。 */
