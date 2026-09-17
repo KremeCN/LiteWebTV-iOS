@@ -265,10 +265,12 @@ final class CctvHlsProxy {
     private func fetchHookScript() -> String {
         if let url = Bundle.main.url(forResource: "cctv_h5e_fetch_hook", withExtension: "js"),
            let data = try? Data(contentsOf: url),
-           let text = String(data: data, encoding: .utf8) {
+           let text = String(data: data, encoding: .utf8),
+           !text.isEmpty {
             return text
         }
-        return ""
+        // 资源没进包时宁可让 worker 502，也不能静默返回未打补丁的官方脚本。
+        return "\n/* lwtv-fetch-hook-missing */\n"
     }
 
     static func patchLiveWorker(_ data: Data, hook: String) -> Data {
@@ -280,7 +282,15 @@ final class CctvHlsProxy {
         guard let range = text.range(of: needle) else {
             return data
         }
-        text.replaceSubrange(range, with: hook + needle)
+        // hook 里有中文注释：isoLatin1 装不下多字节字符，data(using: .isoLatin1) 会
+        // 返回 nil，静默退回未打补丁的 worker。先把 hook 转成 UTF-8 字节，再按
+        // latin1 逐字节映射回 String，保证 isoLatin1 往返一个字节都不丢。
+        var latinHook = ""
+        latinHook.reserveCapacity(hook.utf8.count)
+        for byte in hook.utf8 {
+            latinHook.unicodeScalars.append(UnicodeScalar(byte))
+        }
+        text.replaceSubrange(range, with: latinHook + needle)
         guard let patched = text.data(using: .isoLatin1) else {
             return data
         }
@@ -312,7 +322,13 @@ final class CctvHlsProxy {
                     self.finishWorker(nil)
                     return
                 }
-                let patched = Self.patchLiveWorker(data, hook: self.fetchHookScript())
+                let hook = self.fetchHookScript()
+                let patched = Self.patchLiveWorker(data, hook: hook)
+                if patched == data {
+                    // 钩子缺失或注入点没找到：不要把未打补丁的 worker 当成可用的。
+                    self.finishWorker(nil)
+                    return
+                }
                 self.patchedWorker = patched
                 self.finishWorker(patched)
             }
@@ -329,7 +345,7 @@ final class CctvHlsProxy {
     private func serveWorker(_ connection: NWConnection) {
         ensureWorker { [weak self] data in
             guard let self else { return }
-            guard let data else {
+            guard let data, !data.isEmpty else {
                 self.respond(connection, status: 502, contentType: "text/plain", body: Data("worker\n".utf8))
                 return
             }
