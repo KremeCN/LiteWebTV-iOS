@@ -399,22 +399,105 @@ final class CctvHlsProxy {
                 self?.respond(connection, status: 502, contentType: "text/plain", body: Data("master\n".utf8))
                 return
             }
-            if let variant = CctvHlsRewriter.selectHighestVariant(from: text, masterURL: masterURL) {
-                let proxied = self.mediaProxyURL(variant)
-                let body = """
-                #EXTM3U
-                #EXT-X-INDEPENDENT-SEGMENTS
-                #EXT-X-STREAM-INF:BANDWIDTH=4000000
-                \(proxied)
+            self.pickBestVariant(master: text, masterURL: masterURL, slug: slug) { variant in
+                if let variant {
+                    let proxied = self.mediaProxyURL(variant)
+                    let body = """
+                    #EXTM3U
+                    #EXT-X-INDEPENDENT-SEGMENTS
+                    #EXT-X-STREAM-INF:BANDWIDTH=4000000
+                    \(proxied)
 
-                """
-                self.respond(connection, status: 200, contentType: "application/vnd.apple.mpegurl", body: Data(body.utf8))
+                    """
+                    self.respond(connection, status: 200, contentType: "application/vnd.apple.mpegurl", body: Data(body.utf8))
+                    return
+                }
+                let rewritten = CctvHlsRewriter.rewriteMediaPlaylist(text, mediaURL: masterURL) { [weak self] url in
+                    self?.segmentProxyURL(url) ?? url.absoluteString
+                }
+                self.respond(connection, status: 200, contentType: type ?? "application/vnd.apple.mpegurl", body: Data(rewritten.utf8))
+            }
+        }
+    }
+
+    /// CDN 的 RESOLUTION/BANDWIDTH 标签会挂羊头：cctv1 的“1080P”实测只有 360p 的体积，
+    /// 720P 档反而最大。按声明码率选档会被骗，改为实测各档分片字节数选最大。
+    private var measuredVariantCache: [String: (URL, Date)] = [:]
+
+    private func pickBestVariant(
+        master: String,
+        masterURL: URL,
+        slug: String,
+        completion: @escaping (URL?) -> Void
+    ) {
+        let variants = CctvHlsRewriter.topVariants(from: master, masterURL: masterURL, limit: 3)
+        guard !variants.isEmpty else {
+            completion(nil)
+            return
+        }
+        let cacheKey = masterURL.absoluteString
+        if let (cached, at) = measuredVariantCache[cacheKey],
+           Date().timeIntervalSince(at) < 180,
+           variants.contains(where: { $0 == cached }) {
+            completion(cached)
+            return
+        }
+        let group = DispatchGroup()
+        var sizes: [Int: Int] = [:]   // index -> measured bytes
+        let lock = NSLock()
+        variants.enumerated().forEach { index, variant in
+            group.enter()
+            probeVariantSize(variant, slug: slug) { bytes in
+                lock.lock()
+                sizes[index] = bytes
+                lock.unlock()
+                group.leave()
+            }
+        }
+        group.notify(queue: queue) { [weak self] in
+            guard let self else {
+                completion(nil)
                 return
             }
-            let rewritten = CctvHlsRewriter.rewriteMediaPlaylist(text, mediaURL: masterURL) { [weak self] url in
-                self?.segmentProxyURL(url) ?? url.absoluteString
+            let usable = sizes.filter { $0.value > 0 }
+            guard !usable.isEmpty else {
+                completion(variants.first)
+                return
             }
-            self.respond(connection, status: 200, contentType: type ?? "application/vnd.apple.mpegurl", body: Data(rewritten.utf8))
+            let bestIndex = usable.max { $0.value < $1.value }?.key
+                ?? variants.indices.first ?? 0
+            let chosen = variants[bestIndex]
+            self.measuredVariantCache[cacheKey] = (chosen, Date())
+            completion(chosen)
+        }
+    }
+
+    /// 拉该档 media playlist，对最后一个分片发 Range 0-0 探测真实大小。
+    private func probeVariantSize(_ variant: URL, slug: String, completion: @escaping (Int) -> Void) {
+        fetch(variant, slug: slug) { [weak self] data, _ in
+            guard let self,
+                  let data, let text = String(data: data, encoding: .utf8),
+                  let segment = CctvHlsRewriter.lastSegmentURI(from: text, mediaURL: variant) else {
+                completion(0)
+                return
+            }
+            var request = URLRequest(url: segment)
+            request.setValue(self.userAgent, forHTTPHeaderField: "User-Agent")
+            request.setValue(CctvNativeCatalog.referer(for: slug).absoluteString, forHTTPHeaderField: "Referer")
+            request.setValue("https://tv.cctv.com", forHTTPHeaderField: "Origin")
+            request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+            request.httpMethod = "HEAD"
+            self.session.dataTask(with: request) { _, response, _ in
+                let http = response as? HTTPURLResponse
+                var bytes = http?.value(forHTTPHeaderField: "Content-Length").flatMap { Int($0) } ?? 0
+                if bytes <= 0, let contentRange = http?.value(forHTTPHeaderField: "Content-Range") {
+                    // bytes 0-0/423752 → 423752
+                    if let slash = contentRange.lastIndex(of: "/") {
+                        bytes = Int(contentRange[contentRange.index(after: slash)...]) ?? 0
+                    }
+                }
+                completion(bytes > 0 ? bytes : 0)
+            }.resume()
         }
     }
 
