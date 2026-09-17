@@ -214,7 +214,7 @@ final class CctvHlsProxy {
             return
         }
         if path == "/h5e.html" {
-            respond(connection, status: 200, contentType: "text/html; charset=utf-8", body: Data(Self.h5eHTML.utf8))
+            serveH5eHTML(connection)
             return
         }
         if path.lowercased().hasPrefix("/library/") {
@@ -245,13 +245,26 @@ final class CctvHlsProxy {
         #"{"h5player":{"ver":20190904,"md5":"c7ed5a71dbe4dee1a2ba171f660ee98d","BTime":"2019-09-04-20:25:10"}}"#.utf8
     )
 
-    private static let h5eHTML = """
-    <!DOCTYPE html><html><head><meta charset="utf-8">
-    <script src="/h5e_boot.js"></script>
-    <script src="https://js.player.cntv.cn/creator/live.worker.js"></script>
-    <script src="/h5e.js"></script>
-    </head><body></body></html>
-    """
+    private func bootScript() -> String {
+        if let url = Bundle.main.url(forResource: "cctv_h5e_boot", withExtension: "js"),
+           let data = try? Data(contentsOf: url),
+           let text = String(data: data, encoding: .utf8) {
+            return text
+        }
+        return ""
+    }
+
+    private func serveH5eHTML(_ connection: NWConnection) {
+        let boot = bootScript()
+        let html = """
+        <!DOCTYPE html><html><head><meta charset="utf-8">
+        <script>\(boot)</script>
+        <script src="https://js.player.cntv.cn/creator/live.worker.js"></script>
+        <script src="/h5e.js"></script>
+        </head><body></body></html>
+        """
+        respond(connection, status: 200, contentType: "text/html; charset=utf-8", body: Data(html.utf8))
+    }
 
     private func serveLibrary(_ path: String, connection: NWConnection) {
         if path.lowercased().hasSuffix("/h5player.json") {
