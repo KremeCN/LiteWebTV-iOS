@@ -8,51 +8,34 @@
             window.__lwtvH5eLastFetch = (window.__lwtvH5eLastFetch || '') + tag;
         }
         var LOCATION_HREF = 'blob:https://tv.cctv.com/5bca710b-9f02-41f0-a9f1-102bbc65192a';
-        var origRegister = typeof __emval_register === 'function' ? __emval_register : null;
-        function tagValue(v, seen) {
-            try {
-                if (!v || typeof v !== 'object') return v;
-                if (seen.indexOf(v) >= 0) return v;
-                seen.push(v);
-                if (typeof v.host === 'string') v.host = '';
-                if (typeof v.protocol === 'string') v.protocol = 'blob:';
-                if (typeof v.href === 'string') v.href = LOCATION_HREF;
-                if (typeof v.location === 'object' && v.location) tagValue(v.location, seen);
-                if (typeof v.self === 'object' && v.self) tagValue(v.self, seen);
-            } catch (e) {}
-            return v;
-        }
-        if (origRegister) {
-            __emval_register = function (value) {
-                var handle = origRegister.apply(this, arguments);
-                try {
-                    var v = value;
-                    if (v && typeof v === 'object' &&
-                        (typeof v.host === 'string' || typeof v.protocol === 'string' ||
-                         typeof v.href === 'string' || typeof v.location === 'object')) {
-                        note('|vg');
-                        tagValue(v, []);
-                    }
-                } catch (e) {}
-                return handle;
-            };
-        }
-        if (typeof __emval_get_property === 'function') {
+        /* emval 的属性读取必须返回 handle（整数），直接返回字符串会让
+         * wasm 把字符串当 handle 解引用，InitPlayer 必抛 Cannot use deleted val。
+         * 也绝不能改真实 location：给 location 赋值是页面导航。 */
+        if (typeof __emval_get_property === 'function' && typeof __emval_register === 'function') {
             var origProp = __emval_get_property;
+            var fakeLocation = {
+                host: '',
+                protocol: 'blob:',
+                href: LOCATION_HREF,
+                origin: 'null',
+                toString: function () { return LOCATION_HREF; }
+            };
             __emval_get_property = function (obj, prop) {
-                var v = null;
-                try {
-                    var name = requireHandle(prop);
-                    if (name === 'location') note('|vl');
-                    else if (name === 'host') note('|vh');
-                    else if (name === 'protocol') note('|vp');
-                    else if (name === 'href') note('|vr');
-                    v = origProp.apply(this, arguments);
-                    if (name === 'host') v = '';
-                    else if (name === 'protocol') v = 'blob:';
-                    else if (name === 'href') v = LOCATION_HREF;
-                } catch (e) {}
-                return v;
+                var name = '';
+                var target = null;
+                try { name = requireHandle(prop); } catch (e) { name = ''; }
+                try { target = requireHandle(obj); } catch (e) { target = null; }
+                if (name === 'location' &&
+                    (target === self || target === window || target === globalThis || target === document)) {
+                    note('|vl');
+                    return __emval_register(fakeLocation);
+                }
+                if (target === self.location || target === fakeLocation) {
+                    if (name === 'host') { note('|vh'); return __emval_register(''); }
+                    if (name === 'protocol') { note('|vp'); return __emval_register('blob:'); }
+                    if (name === 'href') { note('|vr'); return __emval_register(LOCATION_HREF); }
+                }
+                return origProp.apply(this, arguments);
             };
         }
         if (typeof _emscripten_asm_const_ii === 'function') {
