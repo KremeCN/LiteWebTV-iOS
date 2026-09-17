@@ -687,6 +687,30 @@ final class WebViewModel: NSObject, ObservableObject {
             // didFinish 并不保证 SPA 已渲染频道列表；失败时保留请求，列表回传后重试。
             guard clicked else { return }
             self.pendingYangshipinDomIndex = nil
+            // 点击后前几秒最容易暴露“页面以为在播、实际黑屏”的加载态：
+            // 采样 video 的 readyState/networkState/src 和 armed 标志。
+            for delay in [0.5, 1.5, 3.0, 5.0] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    guard let self, self.playbackMode == .yangshipin, !self.nativePlaybackActive else { return }
+                    self.yangshipinWebView.evaluateJavaScript(
+                        """
+                        (function(){
+                            var v = document.querySelector('video');
+                            if (!v) return 'no-video';
+                            return 'ready=' + v.readyState + ' net=' + v.networkState +
+                                ' paused=' + v.paused + ' t=' + Math.floor(v.currentTime) +
+                                ' dur=' + (isFinite(v.duration) ? Math.floor(v.duration) : -1) +
+                                ' src=' + (v.currentSrc ? v.currentSrc.slice(0, 60) : '') +
+                                ' armed=' + window.__lwtvYangshipinArmed +
+                                ' err=' + (v.error ? (v.error.code + '/' + v.error.message) : 'none');
+                        })();
+                        """
+                    ) { [weak self] result, _ in
+                        guard let self, let text = result as? String else { return }
+                        self.diagnostics.log("media", "yangshipin video t+\(delay) \(text)")
+                    }
+                }
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
                 self?.yangshipinWebView.evaluateJavaScript("window.extractData()", completionHandler: nil)
             }
@@ -948,13 +972,40 @@ final class WebViewModel: NSObject, ObservableObject {
         let consoleBridge = """
         (function() {
             var oldLog = console.log, oldWarn = console.warn, oldError = console.error;
+            function fmt(args) {
+                var parts = [];
+                for (var i = 0; i < args.length; i++) {
+                    var a = args[i];
+                    try {
+                        if (a instanceof Error) {
+                            parts.push(a.name + ': ' + a.message + (a.stack ? ' | ' + a.stack : ''));
+                        } else if (typeof a === 'object' && a !== null) {
+                            parts.push(JSON.stringify(a));
+                        } else {
+                            parts.push(String(a));
+                        }
+                    } catch (e) { parts.push('[unserializable]'); }
+                }
+                return parts.join(' ');
+            }
             function send(level, args) {
-                var msg = Array.from(args).map(String).join(' ');
-                window.webkit.messageHandlers.bridge.postMessage({type:'console', level:level, data:msg});
+                window.webkit.messageHandlers.bridge.postMessage({type:'console', level:level, data:fmt(args)});
             }
             console.log = function() { oldLog.apply(console, arguments); send('log', arguments); };
             console.warn = function() { oldWarn.apply(console, arguments); send('warn', arguments); };
             console.error = function() { oldError.apply(console, arguments); send('error', arguments); };
+            window.addEventListener('error', function(ev) {
+                if (ev && ev.error) {
+                    send('error', ['uncaught ' + ev.error.name + ': ' + ev.error.message + (ev.error.stack ? ' | ' + ev.error.stack : '')]);
+                } else if (ev && ev.message) {
+                    send('error', ['uncaught ' + ev.message + ' @ ' + (ev.filename || '') + ':' + (ev.lineno || 0)]);
+                }
+            });
+            window.addEventListener('unhandledrejection', function(ev) {
+                var r = ev && (ev.reason || ev.promise);
+                var text = r instanceof Error ? (r.name + ': ' + r.message + (r.stack ? ' | ' + r.stack : '')) : String(r);
+                send('error', ['unhandledrejection ' + text]);
+            });
         })();
         """
         let combined: String
@@ -1283,15 +1334,9 @@ extension WebViewModel: WKScriptMessageHandler {
             case "console":
                 if let level = body["level"] as? String, let msg = body["data"] as? String,
                    level == "error" || msg.contains("[CCTV]") {
-                    let marker: String
-                    if msg.contains("[CCTV]") {
-                        marker = String(msg.prefix(180))
-                    } else if msg.contains("play rejected") {
-                        marker = "cctv play rejected"
-                    } else {
-                        marker = "filtered console event"
-                    }
-                    self.diagnostics.log("js-\(level)", marker)
+                    // 原样透传：之前把未知错误折叠成 "filtered console event"，
+                    // 央视频卡加载时真正的报错内容全被吞掉，无法定位。
+                    self.diagnostics.log("js-\(level)", String(msg.prefix(400)))
                 }
 
             case "appPlaybackResult":
