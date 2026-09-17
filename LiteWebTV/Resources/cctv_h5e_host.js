@@ -38,13 +38,16 @@
                     moduleInstance = resolved;
                     window.__lwtvH5eModule = resolved;
                 }
-                markReady();
             });
         }
         function pollExports() {
             if (ready) return;
-            var asm = moduleInstance && moduleInstance.asm;
-            if (asm && typeof asm.aa === 'function') {
+            var m = moduleInstance;
+            // asm.aa 在 wasm 实例化后立刻就有，但 emscripten run() 还没跑完：
+            // Fetch.staticInit 的 IndexedDB 打开是异步的，dbInstance 未定时
+            // InitPlayer 会直接走错误分支、连 env.q 都不调（last=boot/pending=0 的根因）。
+            // 必须等 calledRun（onRuntimeInitialized 之后）再开始会话。
+            if (m && m.calledRun === true && m.asm && typeof m.asm.aa === 'function') {
                 markReady();
                 return;
             }
