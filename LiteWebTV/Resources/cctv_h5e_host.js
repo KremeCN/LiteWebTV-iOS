@@ -4,7 +4,9 @@
     var PAGE_HOST = 'https://tv.cctv.com';
     // NativeWasmTv / 官网直播播放器的 media tag，是 H5E 密钥状态的一部分。
     var MEDIA_TAG = 'h5player_player';
-    var MEMORY_EXTEND = 2048;
+    // jsdec 输出函数把分配块尾部当变换 scratch：合法 slice 需要接近 2 MiB。
+    // 2 KiB 尾距会在大 slice 上确定性越界 trap（NativeWasmTv 同款注释）。
+    var MEMORY_EXTEND = 2 * 1024 * 1024;
     var moduleInstance = null;
     var ready = false;
     var sessionBegin = false;
@@ -96,6 +98,50 @@
         return moduleInstance._CNTV_UnInitPlayer(playerArg);
     }
 
+    // wasm 里 InitPlayer 触发的 H5player.json fetch 被 hook 挂起到这里。
+    // 官方语义是异步回调：必须等 InitPlayer 返回后再写响应并触发回调。
+    function completePendingFetch() {
+        var ptr = window.__lwtvH5ePendingFetch;
+        if (!ptr) return false;
+        window.__lwtvH5ePendingFetch = 0;
+        var H5PLAYER_JSON = '{"h5player":{"ver":20190904,"md5":"c7ed5a71dbe4dee1a2ba171f660ee98d","BTime":"2019-09-04-20:25:10"}}';
+        try {
+            var payload = new TextEncoder().encode(H5PLAYER_JSON);
+            var dataPtr = moduleInstance._malloc(payload.length);
+            moduleInstance.HEAPU8.set(payload, dataPtr);
+            var heap32 = moduleInstance.HEAPU32;
+            var heap16 = moduleInstance.HEAPU16;
+            heap32[(ptr + 12) >> 2] = dataPtr;
+            heap32[(ptr + 16) >> 2] = payload.length;
+            heap32[(ptr + 20) >> 2] = 0;
+            heap32[(ptr + 24) >> 2] = 0;
+            heap32[(ptr + 28) >> 2] = 0;
+            heap32[(ptr + 32) >> 2] = payload.length;
+            heap32[(ptr + 36) >> 2] = 0;
+            heap16[(ptr + 40) >> 1] = 4;
+            heap16[(ptr + 42) >> 1] = 200;
+            var i;
+            var status = 'OK';
+            for (i = 0; i < status.length; i++) {
+                moduleInstance.HEAPU8[ptr + 44 + i] = status.charCodeAt(i);
+            }
+            moduleInstance.HEAPU8[ptr + 44 + status.length] = 0;
+            var onsuccess = heap32[(ptr + 148) >> 2];
+            var onready = heap32[(ptr + 160) >> 2];
+            if (onsuccess && typeof moduleInstance.dynCall_vi === 'function') {
+                moduleInstance.dynCall_vi(onsuccess, ptr);
+            }
+            if (onready && typeof moduleInstance.dynCall_vi === 'function') {
+                moduleInstance.dynCall_vi(onready, ptr);
+            }
+            window.__lwtvH5eConfigLoaded = true;
+            return true;
+        } catch (err) {
+            window.__lwtvH5eLastFetch = (window.__lwtvH5eLastFetch || '') + '|complete-err:' + err;
+            return false;
+        }
+    }
+
     function updatePlayer() {
         var raw = moduleInstance._CNTV_UpdatePlayer(playerArg);
         vmpTag = (raw >>> 0).toString(16).padStart(8, '0');
@@ -134,6 +180,11 @@
             : 0;
         var out = Uint8Array.from(heap().subarray(addr, addr + decryptedLength));
         moduleInstance._jsfree(addr);
+        // CCTV 把 SPS constraint byte 的 reserved_zero_2bits 用作私有加密标记。
+        // FFmpeg 忽略它，VideoToolbox 可能拒绝整个流；输出前清洗掉。
+        if (type === 7 && out.length >= 3) {
+            out[2] = out[2] & 0xfc;
+        }
         return out;
     }
 
@@ -197,12 +248,34 @@
         var pes = [];
         var map = [];
         var activePid = -1;
+        // 段尾被截断的 PES 不能半解：部分重写的帧会产生上半屏花屏。
+        var pesHeaderLen = 0;
+        var pesPacketLen = 0;
         function flush() {
-            if (!pes.length) return;
+            if (!pes.length) {
+                activePid = -1;
+                pesHeaderLen = 0;
+                pesPacketLen = 0;
+                return;
+            }
+            if (pesPacketLen > 0 && pesHeaderLen >= 6 && pesPacketLen >= pesHeaderLen - 6) {
+                var expected = pesPacketLen - (pesHeaderLen - 6);
+                if (pes.length < expected) {
+                    // 截断：整段 PES 原样输出，不解。
+                    pes = [];
+                    map = [];
+                    activePid = -1;
+                    pesHeaderLen = 0;
+                    pesPacketLen = 0;
+                    return;
+                }
+            }
             decryptPES(Uint8Array.from(pes), map, ts, stats);
             pes = [];
             map = [];
             activePid = -1;
+            pesHeaderLen = 0;
+            pesPacketLen = 0;
         }
         var packet;
         for (packet = 0; packet + 188 <= ts.length; packet += 188) {
@@ -225,7 +298,9 @@
                 }
                 flush();
                 activePid = pid;
-                cursor += 9 + ts[cursor + 8];
+                pesPacketLen = (ts[cursor + 4] << 8) | ts[cursor + 5];
+                pesHeaderLen = 9 + ts[cursor + 8];
+                cursor += pesHeaderLen;
             } else if (pid !== activePid) {
                 continue;
             }
@@ -249,6 +324,7 @@
         releasePlayerArg();
         try {
             initPlayer();
+            completePendingFetch();
             sessionBegin = true;
         } catch (err) {
             window.__lwtvH5eLastFetch = (window.__lwtvH5eLastFetch || '') + '|init-err:' + err;
