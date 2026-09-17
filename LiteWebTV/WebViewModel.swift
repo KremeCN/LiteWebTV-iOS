@@ -587,6 +587,8 @@ final class WebViewModel: NSObject, ObservableObject {
                 self.diagnostics.log("media", "activate aborted stale gen=\(generation)")
                 return
             }
+            // 被挂起过的页面：setAllMediaPlaybackSuspended(false) 不会重新 load 已有的 src，
+            // <video> 会停在 metadata 阶段。先显式解除挂起，再补一次 load+play。
             webView.setAllMediaPlaybackSuspended(false) { [weak self] in
                 guard let self else { return }
                 guard generation == self.mediaGeneration else { return }
@@ -600,9 +602,42 @@ final class WebViewModel: NSObject, ObservableObject {
                     } else {
                         self.setYangshipinArmed(false)
                         self.yangshipinReadyToClick = false
+                        self.reviveSuspendedVideo(in: webView)
                     }
                     completion()
                 }
+            }
+        }
+    }
+
+    /// 唤醒被挂起过的央视网页 <video>：reload src 并 play，绕开 WK 的 metadata 卡死。
+    private func reviveSuspendedVideo(in webView: WKWebView) {
+        guard playbackMode == .cctv, !nativePlaybackActive else { return }
+        let js = """
+        (function(){
+            var v = document.querySelector('video');
+            if (!v) return 'no-video';
+            if (!v.paused && v.readyState >= 3 && v.currentTime > 0.1) return 'already-playing';
+            var src = v.currentSrc || v.src || '';
+            if (src.length < 8) return 'no-src';
+            try { v.load(); } catch (e) {}
+            var p = v.play();
+            if (p && typeof p.then === 'function') {
+                p.then(function(){ return 'played'; })
+                 .catch(function(e){ return 'rejected:' + (e && e.name); });
+            } else {
+                return 'play-sync';
+            }
+        })();
+        """
+        webView.evaluateJavaScript(js) { [weak self] result, error in
+            guard let self else { return }
+            if let error {
+                self.diagnostics.log("media", "revive video failed \(String(describing: error.localizedDescription))")
+                return
+            }
+            if let text = result as? String {
+                self.diagnostics.log("media", "revive video \(text)")
             }
         }
     }
@@ -794,8 +829,9 @@ final class WebViewModel: NSObject, ObservableObject {
         abandonNativeKeepingSession()
         if CctvNativeCatalog.allowsWebpageFallback(slug), playbackMode == .cctv {
             splashDeadlineExtend += 1
-            loadCctvPage(for: slug)
+            // 先激活（解除挂起），再加载：didCommit 注入的 automation 才会跑在已唤醒的页面上。
             activate(cctvWebView)
+            loadCctvPage(for: slug)
             return
         }
         playbackError = "该频道暂无法播放"
