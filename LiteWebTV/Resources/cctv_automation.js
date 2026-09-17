@@ -134,7 +134,10 @@
 
     addTask('autoPlay', function () {
         if (tryPlayVideo()) return true;
-        return clickPlayButton();
+        if (clickPlayButton()) return true;
+        // 视频可能还没拿到 src（src.length<8 时 tryPlayVideo 返回 false）。
+        // 保留任务等 MutationObserver 的下一帧重试，不要一次失败就永久放弃。
+        return false;
     });
 
     addTask('videoMonitor', function () {
