@@ -11,6 +11,8 @@ assert.ok(hook.includes('_emscripten_start_fetch'), 'hook wraps start_fetch');
 assert.ok(hook.includes('h5player'), 'hook recognizes H5player.json');
 assert.ok(hook.includes('__lwtvH5eWorkerPatched'), 'hook marks patched state');
 
+assert.ok(hook.includes('_emscripten_asm_const_ii'), 'hook wraps asm_const location eval');
+
 function patchLiveWorker(source, hookText) {
     const needle = 'var asmGlobalArg={}';
     const at = source.indexOf(needle);
@@ -24,13 +26,14 @@ function patchLiveWorker(source, hookText) {
 const fixture = [
     'function UTF8ToString(A){return String(A);}',
     'function _emscripten_start_fetch(A){return A;}',
+    'function _emscripten_asm_const_ii(A,e){return e;}',
     'var Fetch={setu64:function(){}};',
-    'var asmGlobalArg={},asmLibraryArg={$:abort,q:_emscripten_start_fetch},asm=Module.asm(asmGlobalArg,asmLibraryArg,buffer);'
+    'var asmGlobalArg={},asmLibraryArg={$:abort,q:_emscripten_start_fetch,y:_emscripten_asm_const_ii},asm=Module.asm(asmGlobalArg,asmLibraryArg,buffer);'
 ].join('');
 
 const patched = patchLiveWorker(fixture, hook);
 assert.ok(patched.indexOf('var asmGlobalArg={}') > patched.indexOf('_emscripten_start_fetch = function'));
-assert.ok(patched.includes('asmLibraryArg={$:abort,q:_emscripten_start_fetch}'));
+assert.ok(patched.includes('asmLibraryArg={$:abort,q:_emscripten_start_fetch,y:_emscripten_asm_const_ii}'));
 assert.ok(!/var asmGlobalArg=\{\},\(function/.test(patched));
 assert.notStrictEqual(patched, fixture, 'patched output must differ from input');
 

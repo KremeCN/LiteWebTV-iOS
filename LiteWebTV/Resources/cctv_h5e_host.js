@@ -105,7 +105,10 @@
     // 官方语义是异步回调：必须等 InitPlayer 返回后再写响应并触发回调。
     function completePendingFetch() {
         var ptr = window.__lwtvH5ePendingFetch;
-        if (!ptr) return false;
+        if (!ptr) {
+            window.__lwtvH5eLastFetch = (window.__lwtvH5eLastFetch || '') + '|np';
+            return false;
+        }
         window.__lwtvH5ePendingFetch = 0;
         var H5PLAYER_JSON = '{"h5player":{"ver":20190904,"md5":"c7ed5a71dbe4dee1a2ba171f660ee98d","BTime":"2019-09-04-20:25:10"}}';
         try {
@@ -463,34 +466,43 @@
             if (!ready) return Promise.resolve('not-ready');
             var frozen = originNow();
             Date.now = function () { return frozen; };
-            try {
-                // UpdatePlayer 连续跑几个分片后 VMP 会错；NativeWasmTv 每个 TS 都 Uninit+Init。
-                startSession();
-            } catch (err) {
-                Date.now = originNow;
-                return Promise.resolve('drop:reset ' + String(err) + ' last=' + (window.__lwtvH5eLastFetch || ''));
-            }
-            if (!window.__lwtvH5eConfigLoaded) {
-                Date.now = originNow;
-                return Promise.resolve('drop:noconfig last=' + (window.__lwtvH5eLastFetch || '') +
-                    ' pending=' + (window.__lwtvH5ePendingFetch || 0));
-            }
-            var url = 'http://127.0.0.1:' + (window.__lwtvH5ePort || location.port) + '/inbox/' + id;
-            return fetch(url).then(function (res) {
-                if (!res.ok) throw new Error('inbox');
-                return res.arrayBuffer();
-            }).then(function (buf) {
-                var stats = { nals: 0, changed: 0, skipped: 0 };
-                var out = decryptTS(buf, stats);
-                return fetch('http://127.0.0.1:' + (window.__lwtvH5ePort || location.port) + '/outbox/' + id, {
+            var port = window.__lwtvH5ePort || location.port;
+            var inbox = 'http://127.0.0.1:' + port + '/inbox/' + id;
+            var outbox = 'http://127.0.0.1:' + port + '/outbox/' + id;
+            function put(buf, text) {
+                return fetch(outbox, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/octet-stream' },
-                    body: out
+                    body: buf
                 }).then(function (res) {
                     Date.now = originNow;
                     if (!res.ok) return 'put';
-                    return 'ok nals=' + stats.nals + ' changed=' + stats.changed + ' skipped=' + stats.skipped + ' tag=' + vmpTag;
+                    return text;
                 });
+            }
+            return fetch(inbox).then(function (res) {
+                if (!res.ok) throw new Error('inbox');
+                return res.arrayBuffer();
+            }).then(function (buf) {
+                try {
+                    // UpdatePlayer 连续跑几个分片后 VMP 会错；NativeWasmTv 每个 TS 都 Uninit+Init。
+                    startSession();
+                } catch (err) {
+                    return put(buf, 'ok nals=0 changed=0 skipped=0 tag=reset-err last=' +
+                        (window.__lwtvH5eLastFetch || ''));
+                }
+                if (!window.__lwtvH5eConfigLoaded) {
+                    completePendingFetch();
+                }
+                var stats = { nals: 0, changed: 0, skipped: 0 };
+                var out = window.__lwtvH5eConfigLoaded ? decryptTS(buf, stats) : new Uint8Array(buf);
+                var tag = vmpTag || 'none';
+                if (!window.__lwtvH5eConfigLoaded) {
+                    tag = 'noconfig last=' + (window.__lwtvH5eLastFetch || '') +
+                        ' pending=' + (window.__lwtvH5ePendingFetch || 0);
+                }
+                return put(out, 'ok nals=' + stats.nals + ' changed=' + stats.changed +
+                    ' skipped=' + stats.skipped + ' tag=' + tag);
             }).catch(function (err) {
                 Date.now = originNow;
                 try { stopSession(); startSession(); } catch (resetErr) {}
