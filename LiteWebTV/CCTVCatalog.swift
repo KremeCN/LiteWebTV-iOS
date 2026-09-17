@@ -10,17 +10,20 @@ enum CCTVCatalog {
         var epgId: String { slug }
     }
 
-    // 移动入口的 CCTV-3/6/8 会跳转服务区提示页，不提供央视网源。
-    // 名称匹配仍保留其稳定 ID，供央视频频道及历史选台恢复使用。
+    // 央视网源一律先走原生 CDN（VDN 可能拒播而清单仍在）。
+    // 3/6/8 手机页会踢到央视频空页，CDN 失败也不回 `/m/`。
     static let channels: [Entry] = [
         Entry(slug: "cctv1", name: "CCTV-1 综合"),
         Entry(slug: "cctv2", name: "CCTV-2 财经"),
+        Entry(slug: "cctv3", name: "CCTV-3 综艺"),
         Entry(slug: "cctv4", name: "CCTV-4 中文国际（亚）"),
         Entry(slug: "cctveurope", name: "CCTV-4 中文国际（欧）"),
         Entry(slug: "cctvamerica", name: "CCTV-4 中文国际（美）"),
         Entry(slug: "cctv5", name: "CCTV-5 体育"),
         Entry(slug: "cctv5plus", name: "CCTV-5+ 体育赛事"),
+        Entry(slug: "cctv6", name: "CCTV-6 电影"),
         Entry(slug: "cctv7", name: "CCTV-7 国防军事"),
+        Entry(slug: "cctv8", name: "CCTV-8 电视剧"),
         Entry(slug: "cctvjilu", name: "CCTV-9 纪录"),
         Entry(slug: "cctv10", name: "CCTV-10 科教"),
         Entry(slug: "cctv11", name: "CCTV-11 戏曲"),
@@ -34,6 +37,10 @@ enum CCTVCatalog {
 
     static func entry(for slug: String) -> Entry? {
         channels.first { $0.slug == slug }
+    }
+
+    static func usesNativeCDN(_ slug: String) -> Bool {
+        CctvNativeCatalog.supports(slug)
     }
 
     /// 手机直播页。iPhone Safari UA 下桌面页会跳 `/m/`，且桌面 HTML 里没有
