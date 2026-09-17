@@ -660,13 +660,14 @@ final class WebViewModel: NSObject, ObservableObject {
             return 'rejected:' + (err && err.name) + ' ' + String((err && err.message) || '');
         }
         """
-        cctvWebView.callAsyncJavaScript(js, arguments: [:], in: nil, in: .page) { [weak self] value, error in
+        cctvWebView.callAsyncJavaScript(js, arguments: [:], in: nil, in: .page) { [weak self] result in
             guard let self else { return }
-            if let error {
+            switch result {
+            case .success(let value):
+                self.diagnostics.log("media", "play-kick t+\(delay) \(String(describing: value))")
+            case .failure(let error):
                 self.diagnostics.log("media", "play-kick t+\(delay) failed \(error.localizedDescription)")
-                return
             }
-            self.diagnostics.log("media", "play-kick t+\(delay) \(String(describing: value))")
         }
     }
 
