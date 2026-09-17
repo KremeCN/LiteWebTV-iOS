@@ -101,6 +101,9 @@ final class WebViewModel: NSObject, ObservableObject {
         nativePlayer.onFailed = { [weak self] _ in
             self?.failNativeCctv(reason: "player")
         }
+        CctvH5eSession.shared.onLog = { [weak self] line in
+            self?.diagnostics.log("h5e", line)
+        }
         diagnostics.beginSession("app launch build=\(PlaybackDiagnostics.buildID)")
         diagnostics.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
