@@ -13,6 +13,8 @@ final class CctvH5eSession: NSObject, WKNavigationDelegate {
     private var busy = false
     private var queue: [(Data, (Data?) -> Void)] = []
     private var generation = 0
+    var onLog: ((String) -> Void)?
+    private var decryptLogCount = 0
 
     func prepare(completion: @escaping (Bool) -> Void) {
         DispatchQueue.main.async {
@@ -156,11 +158,13 @@ final class CctvH5eSession: NSObject, WKNavigationDelegate {
                     in: .page
                 ) { result in
                     switch result {
-                    case .success:
+                    case .success(let value):
                         self.prepared = true
+                        self.onLog?("start \(String(describing: value))")
                         self.finishPrepare(true)
-                    case .failure:
+                    case .failure(let error):
                         self.prepared = false
+                        self.onLog?("start failed \(error.localizedDescription)")
                         self.finishPrepare(false)
                     }
                 }
@@ -202,8 +206,14 @@ final class CctvH5eSession: NSObject, WKNavigationDelegate {
             var output: Data?
             switch result {
             case .success(let value):
-                if (value as? String) == "ok" {
+                if let text = value as? String, text.hasPrefix("ok") {
                     output = CctvHlsProxy.shared.takeOutbox(id: id)
+                    self.decryptLogCount += 1
+                    if self.decryptLogCount <= 8 || self.decryptLogCount % 30 == 0 {
+                        self.onLog?("decrypt \(text)")
+                    }
+                } else if let text = value as? String {
+                    self.onLog?("decrypt \(text)")
                 }
             case .failure:
                 output = nil

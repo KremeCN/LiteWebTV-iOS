@@ -154,7 +154,7 @@
         return starts;
     }
 
-    function decryptPES(data, map, ts) {
+    function decryptPES(data, map, ts, stats) {
         var starts = findStartCodes(data);
         var n;
         for (n = 0; n < starts.length; n++) {
@@ -168,11 +168,14 @@
                 throw err;
             }
             if (!decrypted) continue;
+            stats.nals += 1;
             if (decrypted.length !== (to - from)) {
+                stats.skipped += 1;
                 continue;
             }
             var offset;
             for (offset = 0; offset < decrypted.length; offset++) {
+                if (ts[map[from + offset]] !== decrypted[offset]) stats.changed += 1;
                 ts[map[from + offset]] = decrypted[offset];
             }
         }
@@ -182,7 +185,7 @@
         return streamId >= 0xe0 && streamId <= 0xef;
     }
 
-    function decryptTS(buffer) {
+    function decryptTS(buffer, stats) {
         var ts = new Uint8Array(buffer);
         if (ts.length < 188 || ts[0] !== 0x47) {
             return ts;
@@ -192,7 +195,7 @@
         var activePid = -1;
         function flush() {
             if (!pes.length) return;
-            decryptPES(Uint8Array.from(pes), map, ts);
+            decryptPES(Uint8Array.from(pes), map, ts, stats);
             pes = [];
             map = [];
             activePid = -1;
@@ -256,9 +259,17 @@
     window.__lwtvH5e = {
         isReady: function () { return ready && typeof CNTVModule === 'function'; },
         start: function () {
+            window.__lwtvH5eConfigLoaded = false;
             startSession();
             return new Promise(function (resolve) {
-                setTimeout(function () { resolve('ok'); }, 500);
+                var n = 0;
+                var timer = setInterval(function () {
+                    n += 1;
+                    if (window.__lwtvH5eConfigLoaded || n >= 40) {
+                        clearInterval(timer);
+                        resolve(window.__lwtvH5eConfigLoaded ? 'ok' : 'ok-timeout');
+                    }
+                }, 50);
             });
         },
         stop: function () {
@@ -274,15 +285,17 @@
                 if (!res.ok) throw new Error('inbox');
                 return res.arrayBuffer();
             }).then(function (buf) {
-                var out = decryptTS(buf);
+                var stats = { nals: 0, changed: 0, skipped: 0 };
+                var out = decryptTS(buf, stats);
                 return fetch('http://127.0.0.1:' + (window.__lwtvH5ePort || location.port) + '/outbox/' + id, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/octet-stream' },
                     body: out
+                }).then(function (res) {
+                    Date.now = originNow;
+                    if (!res.ok) return 'put';
+                    return 'ok nals=' + stats.nals + ' changed=' + stats.changed + ' skipped=' + stats.skipped + ' tag=' + vmpTag;
                 });
-            }).then(function (res) {
-                Date.now = originNow;
-                return res.ok ? 'ok' : 'put';
             }).catch(function (err) {
                 Date.now = originNow;
                 try { stopSession(); startSession(); } catch (resetErr) {}

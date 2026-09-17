@@ -214,13 +214,11 @@ final class CctvHlsProxy {
             return
         }
         if path == "/h5e.html" {
-            let html = """
-            <!DOCTYPE html><html><head><meta charset="utf-8">
-            <script src="https://js.player.cntv.cn/creator/live.worker.js"></script>
-            <script src="/h5e.js"></script>
-            </head><body></body></html>
-            """
-            respond(connection, status: 200, contentType: "text/html; charset=utf-8", body: Data(html.utf8))
+            respond(connection, status: 200, contentType: "text/html; charset=utf-8", body: Data(Self.h5eHTML.utf8))
+            return
+        }
+        if path.lowercased().hasPrefix("/library/") {
+            serveLibrary(path, connection: connection)
             return
         }
         if path == "/h5e.js" {
@@ -239,6 +237,75 @@ final class CctvHlsProxy {
             return
         }
         respond(connection, status: 404, contentType: "text/plain", body: Data("missing\n".utf8))
+    }
+
+    /// InitPlayer 会按页面源去拉 `/Library/H5player.json`。隐藏页在 127.0.0.1，必须转给官网。
+    private static let h5playerFallback = Data(
+        #"{"h5player":{"ver":20190904,"md5":"c7ed5a71dbe4dee1a2ba171f660ee98d","BTime":"2019-09-04-20:25:10"}}"#.utf8
+    )
+
+    private static let h5eHTML = """
+    <!DOCTYPE html><html><head><meta charset="utf-8">
+    <script>
+    (function () {
+      function rewrite(url) {
+        try {
+          var u = new URL(String(url), location.href);
+          var path = u.pathname;
+          if (path.indexOf('/Library/') === 0 || path.indexOf('/library/') === 0) {
+            return location.origin + path + u.search;
+          }
+        } catch (err) {}
+        return url;
+      }
+      window.__lwtvH5eConfigLoaded = false;
+      function markConfig() { window.__lwtvH5eConfigLoaded = true; }
+      var ofetch = window.fetch.bind(window);
+      window.fetch = function (input, init) {
+        var url = typeof input === 'string' ? rewrite(input) : (input && input.url ? rewrite(input.url) : input);
+        var req = (typeof input === 'string') ? url : (input && input.url ? new Request(url, input) : input);
+        var p = ofetch(req, init);
+        if (String(url).toLowerCase().indexOf('h5player.json') >= 0) p.then(markConfig, markConfig);
+        return p;
+      };
+      var open = XMLHttpRequest.prototype.open;
+      XMLHttpRequest.prototype.open = function (method, url) {
+        var next = typeof url === 'string' ? rewrite(url) : url;
+        arguments[1] = next;
+        if (String(next).toLowerCase().indexOf('h5player.json') >= 0) {
+          this.addEventListener('loadend', markConfig);
+        }
+        return open.apply(this, arguments);
+      };
+    })();
+    </script>
+    <script src="https://js.player.cntv.cn/creator/live.worker.js"></script>
+    <script src="/h5e.js"></script>
+    </head><body></body></html>
+    """
+
+    private func serveLibrary(_ path: String, connection: NWConnection) {
+        if path.lowercased().hasSuffix("/h5player.json") {
+            respond(connection, status: 200, contentType: "application/json", body: Self.h5playerFallback)
+            return
+        }
+        guard let remote = URL(string: "https://tv.cctv.com" + path) else {
+            respond(connection, status: 404, contentType: "text/plain", body: Data("library\n".utf8))
+            return
+        }
+        fetch(remote, slug: currentSlug) { [weak self] data, type in
+            guard let self else { return }
+            if let data, !data.isEmpty {
+                self.respond(
+                    connection,
+                    status: 200,
+                    contentType: type ?? "application/octet-stream",
+                    body: data
+                )
+                return
+            }
+            self.respond(connection, status: 404, contentType: "text/plain", body: Data("library\n".utf8))
+        }
     }
 
     private func serveMaster(slug: String, connection: NWConnection) {
