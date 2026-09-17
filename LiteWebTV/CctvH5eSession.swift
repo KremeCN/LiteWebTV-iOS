@@ -37,7 +37,12 @@ final class CctvH5eSession: NSObject, WKNavigationDelegate {
                 completion?()
                 return
             }
-            webView.evaluateJavaScript("window.__lwtvH5e && window.__lwtvH5e.start()") { _, _ in
+            webView.callAsyncJavaScript(
+                "return await window.__lwtvH5e.start();",
+                arguments: [:],
+                in: nil,
+                in: .page
+            ) { _ in
                 completion?()
             }
         }
@@ -144,9 +149,20 @@ final class CctvH5eSession: NSObject, WKNavigationDelegate {
         webView?.evaluateJavaScript("!!(window.__lwtvH5e && window.__lwtvH5e.isReady())") { [weak self] result, _ in
             guard let self else { return }
             if (result as? Bool) == true {
-                self.webView?.evaluateJavaScript("window.__lwtvH5e.start()") { _, error in
-                    self.prepared = error == nil
-                    self.finishPrepare(self.prepared)
+                self.webView?.callAsyncJavaScript(
+                    "return await window.__lwtvH5e.start();",
+                    arguments: [:],
+                    in: nil,
+                    in: .page
+                ) { result in
+                    switch result {
+                    case .success:
+                        self.prepared = true
+                        self.finishPrepare(true)
+                    case .failure:
+                        self.prepared = false
+                        self.finishPrepare(false)
+                    }
                 }
                 return
             }

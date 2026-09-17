@@ -2,14 +2,15 @@
     'use strict';
 
     var PAGE_HOST = 'https://tv.cctv.com';
-    var MEDIA_TAG = 'player_container_player';
+    // NativeWasmTv / 官网直播播放器的 media tag，是 H5E 密钥状态的一部分。
+    var MEDIA_TAG = 'h5player_player';
     var MEMORY_EXTEND = 2048;
-    var VIDEO_PID = 0x100;
     var moduleInstance = null;
     var ready = false;
     var sessionBegin = false;
-    var shouldDecrypt = false;
+    var shouldDecrypt = true;
     var vmpTag = '';
+    var playerArg = 0;
     var originNow = Date.now.bind(Date);
 
     function waitForModule(done) {
@@ -44,83 +45,91 @@
         }
     }
 
+    function heap() {
+        return moduleInstance.HEAPU8 || moduleInstance.HEAP8;
+    }
+
     function allocTag(tag) {
         var memory = moduleInstance._jsmalloc(tag.length + MEMORY_EXTEND);
-        moduleInstance.HEAP8.fill(0, memory, memory + tag.length + MEMORY_EXTEND);
+        heap().fill(0, memory, memory + tag.length + MEMORY_EXTEND);
         var i;
         for (i = 0; i < tag.length; i++) {
-            moduleInstance.HEAP8[memory + i] = tag.charCodeAt(i);
+            heap()[memory + i] = tag.charCodeAt(i);
         }
         return memory;
     }
 
+    function ensurePlayerArg() {
+        if (playerArg) return playerArg;
+        playerArg = allocTag(MEDIA_TAG);
+        return playerArg;
+    }
+
+    function releasePlayerArg() {
+        if (!playerArg || !moduleInstance) {
+            playerArg = 0;
+            return;
+        }
+        try { moduleInstance._jsfree(playerArg); } catch (err) {}
+        playerArg = 0;
+    }
+
+    function decryptFn(index) {
+        var live = moduleInstance['_CNTV_jsdecLive' + index];
+        if (typeof live === 'function') return live;
+        return moduleInstance['_CNTV_jsdecVOD' + index];
+    }
+
     function initPlayer() {
-        var memory = allocTag(MEDIA_TAG);
-        var ret = moduleInstance._CNTV_InitPlayer(memory);
-        moduleInstance._jsfree(memory);
-        return ret;
+        ensurePlayerArg();
+        return moduleInstance._CNTV_InitPlayer(playerArg);
     }
 
     function uninitPlayer() {
-        var memory = allocTag(MEDIA_TAG);
-        var ret = moduleInstance._CNTV_UnInitPlayer(memory);
-        moduleInstance._jsfree(memory);
-        return ret;
+        if (!playerArg) return 0;
+        return moduleInstance._CNTV_UnInitPlayer(playerArg);
     }
 
     function updatePlayer() {
-        var memory = allocTag(MEDIA_TAG);
-        vmpTag = moduleInstance._CNTV_UpdatePlayer(memory).toString(16).padStart(8, '0');
-        moduleInstance._jsfree(memory);
+        var raw = moduleInstance._CNTV_UpdatePlayer(playerArg);
+        vmpTag = (raw >>> 0).toString(16).padStart(8, '0');
     }
 
-    function decryptNAL(header, payload) {
-        updatePlayer();
+    function decryptNAL(nal) {
+        var header = nal[0];
         var type = header & 0x1f;
-        var special = true;
         if (type === 25) {
-            shouldDecrypt = payload[0] === 1;
-            special = false;
+            shouldDecrypt = nal.length > 1 && nal[1] === 1;
         } else if (type === 1 || type === 5) {
             if (!shouldDecrypt) return null;
         } else {
             return null;
         }
 
-        var localTag = special ? (MEDIA_TAG + '##1000000##0') : MEDIA_TAG;
-        var addr = moduleInstance._jsmalloc(payload.byteLength + 1 + MEMORY_EXTEND);
-        var addr2 = moduleInstance._jsmalloc(localTag.length + 1);
-        var heap = moduleInstance.HEAPU8 || moduleInstance.HEAP8;
-        heap[addr] = header;
-        heap.set(payload, addr + 1);
-        var hostOff = addr + payload.byteLength + 1;
+        updatePlayer();
+        var addr = moduleInstance._jsmalloc(nal.byteLength + PAGE_HOST.length + MEMORY_EXTEND);
+        var mem = heap();
+        mem.set(nal, addr);
         var hi;
         for (hi = 0; hi < PAGE_HOST.length; hi++) {
-            heap[hostOff + hi] = PAGE_HOST.charCodeAt(hi);
-        }
-        for (hi = 0; hi < localTag.length; hi++) {
-            heap[addr2 + hi] = localTag.charCodeAt(hi);
+            mem[addr + nal.byteLength + hi] = PAGE_HOST.charCodeAt(hi);
         }
 
         var i;
         for (i = 0; i < vmpTag.length; i++) {
             if ('0123456'.indexOf(vmpTag[i]) >= 0) {
-                var fn = moduleInstance['_CNTV_jsdecVOD' + (7 - i)];
-                if (typeof fn === 'function') {
-                    fn(addr2, addr, payload.byteLength + 1, PAGE_HOST.length);
+                var step = decryptFn(7 - i);
+                if (typeof step === 'function') {
+                    step(playerArg, addr, nal.byteLength, PAGE_HOST.length);
                 }
             }
         }
-        var decryptedLength = moduleInstance._CNTV_jsdecVOD8(
-            addr2,
-            addr,
-            payload.byteLength + 1,
-            PAGE_HOST.length
-        );
-        var heapOut = moduleInstance.HEAPU8 || moduleInstance.HEAP8;
-        var out = Uint8Array.from(heapOut.subarray(addr, addr + decryptedLength));
+        var finish = decryptFn(8);
+        var decryptedLength = typeof finish === 'function'
+            ? finish(playerArg, addr, nal.byteLength, PAGE_HOST.length)
+            : 0;
+        var out = Uint8Array.from(heap().subarray(addr, addr + decryptedLength));
         moduleInstance._jsfree(addr);
-        moduleInstance._jsfree(addr2);
         return out;
     }
 
@@ -152,23 +161,25 @@
             var from = starts[n].nal;
             var to = n + 1 < starts.length ? starts[n + 1].nal - starts[n + 1].code : data.length;
             if (from >= to) continue;
-            var header = data[from];
-            var payload = data.subarray(from + 1, to);
             var decrypted;
             try {
-                decrypted = decryptNAL(header, payload);
+                decrypted = decryptNAL(data.subarray(from, to));
             } catch (err) {
                 throw err;
             }
             if (!decrypted) continue;
             if (decrypted.length !== (to - from)) {
-                throw new Error('nal-size');
+                continue;
             }
             var offset;
             for (offset = 0; offset < decrypted.length; offset++) {
                 ts[map[from + offset]] = decrypted[offset];
             }
         }
+    }
+
+    function isVideoPES(streamId) {
+        return streamId >= 0xe0 && streamId <= 0xef;
     }
 
     function decryptTS(buffer) {
@@ -178,11 +189,13 @@
         }
         var pes = [];
         var map = [];
+        var activePid = -1;
         function flush() {
             if (!pes.length) return;
             decryptPES(Uint8Array.from(pes), map, ts);
             pes = [];
             map = [];
+            activePid = -1;
         }
         var packet;
         for (packet = 0; packet + 188 <= ts.length; packet += 188) {
@@ -194,12 +207,20 @@
             if (adaptation === 2 || adaptation === 3) {
                 payloadOff = 5 + ts[packet + 4];
             }
-            if (pid !== VIDEO_PID || payloadOff >= 188) continue;
-            if (start) flush();
+            if (payloadOff >= 188) continue;
             var cursor = packet + payloadOff;
             var end = packet + 188;
             if (start && end - cursor >= 9 && ts[cursor] === 0 && ts[cursor + 1] === 0 && ts[cursor + 2] === 1) {
+                var streamId = ts[cursor + 3];
+                if (!isVideoPES(streamId)) {
+                    if (activePid === pid) flush();
+                    continue;
+                }
+                flush();
+                activePid = pid;
                 cursor += 9 + ts[cursor + 8];
+            } else if (pid !== activePid) {
+                continue;
             }
             for (; cursor < end; cursor++) {
                 pes.push(ts[cursor]);
@@ -216,8 +237,9 @@
             uninitPlayer();
             sessionBegin = false;
         }
-        shouldDecrypt = false;
+        shouldDecrypt = true;
         vmpTag = '';
+        releasePlayerArg();
         initPlayer();
         sessionBegin = true;
     }
@@ -226,14 +248,18 @@
         if (!sessionBegin) return;
         try { uninitPlayer(); } catch (err) {}
         sessionBegin = false;
-        shouldDecrypt = false;
+        shouldDecrypt = true;
+        vmpTag = '';
+        releasePlayerArg();
     }
 
     window.__lwtvH5e = {
         isReady: function () { return ready && typeof CNTVModule === 'function'; },
         start: function () {
             startSession();
-            return 'ok';
+            return new Promise(function (resolve) {
+                setTimeout(function () { resolve('ok'); }, 500);
+            });
         },
         stop: function () {
             stopSession();
