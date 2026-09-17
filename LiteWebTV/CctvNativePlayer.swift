@@ -1,4 +1,5 @@
 import AVFoundation
+import AVKit
 import SwiftUI
 import UIKit
 
@@ -6,8 +7,9 @@ final class CctvNativePlayer: NSObject {
     let player = AVPlayer()
     var onReady: (() -> Void)?
     var onFailed: ((String) -> Void)?
+    var onVideoSize: ((CGSize) -> Void)?
     private var itemObservation: NSKeyValueObservation?
-    private var statusObservation: NSKeyValueObservation?
+    private var sizeObservation: NSKeyValueObservation?
 
     override init() {
         super.init()
@@ -21,13 +23,17 @@ final class CctvNativePlayer: NSObject {
     func play(url: URL) {
         let item = AVPlayerItem(url: url)
         itemObservation?.invalidate()
-        statusObservation?.invalidate()
+        sizeObservation?.invalidate()
         itemObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
             DispatchQueue.main.async {
                 switch item.status {
                 case .readyToPlay:
                     self?.player.play()
                     self?.onReady?()
+                    let size = item.presentationSize
+                    if size.width > 0, size.height > 0 {
+                        self?.onVideoSize?(size)
+                    }
                 case .failed:
                     let message = item.error?.localizedDescription ?? "原生播放失败"
                     self?.onFailed?(message)
@@ -36,15 +42,22 @@ final class CctvNativePlayer: NSObject {
                 }
             }
         }
+        sizeObservation = item.observe(\.presentationSize, options: [.new]) { [weak self] item, _ in
+            let size = item.presentationSize
+            guard size.width > 0, size.height > 0 else { return }
+            DispatchQueue.main.async {
+                self?.onVideoSize?(size)
+            }
+        }
         player.replaceCurrentItem(with: item)
         player.play()
     }
 
     func stop() {
         itemObservation?.invalidate()
-        statusObservation?.invalidate()
+        sizeObservation?.invalidate()
         itemObservation = nil
-        statusObservation = nil
+        sizeObservation = nil
         player.pause()
         player.replaceCurrentItem(with: nil)
     }
@@ -68,47 +81,25 @@ final class CctvNativePlayer: NSObject {
     }
 }
 
-final class NativePlayerUIView: UIView {
-    private let playerLayer = AVPlayerLayer()
-
-    var player: AVPlayer? {
-        get { playerLayer.player }
-        set { playerLayer.player = newValue }
-    }
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        isOpaque = true
-        backgroundColor = .black
-        playerLayer.videoGravity = .resizeAspect
-        playerLayer.backgroundColor = UIColor.black.cgColor
-        layer.addSublayer(playerLayer)
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        playerLayer.frame = bounds
-        CATransaction.commit()
-    }
-}
-
-struct NativePlayerView: UIViewRepresentable {
+struct NativePlayerView: UIViewControllerRepresentable {
     let player: AVPlayer
 
-    func makeUIView(context: Context) -> NativePlayerUIView {
-        let view = NativePlayerUIView()
-        view.player = player
-        return view
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let controller = AVPlayerViewController()
+        controller.player = player
+        controller.showsPlaybackControls = false
+        controller.videoGravity = .resizeAspect
+        controller.view.backgroundColor = .black
+        controller.view.isUserInteractionEnabled = false
+        if #available(iOS 16.0, *) {
+            controller.allowsVideoFrameAnalysis = false
+        }
+        return controller
     }
 
-    func updateUIView(_ uiView: NativePlayerUIView, context: Context) {
-        uiView.player = player
-        uiView.setNeedsLayout()
+    func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {
+        if controller.player !== player {
+            controller.player = player
+        }
     }
 }
